@@ -149,7 +149,9 @@ static void ZARDumpChatEntity(id obj, NSString *prefix) {
         @"messageId", @"messageID", @"msgId", @"msgID",
         @"recallTime", @"recall_time", @"isRecall", @"isRecalled",
         @"isOwnerRecall", @"ownerRecall", @"message_recall",
-        @"recalled_message", @"chatId", @"conversationId"
+        @"recalled_message", @"chatId", @"conversationId",
+        @"_isRecallDelByMySelf", @"_deleted", @"status",
+        @"_messagetype", @"_originTextRecallMsg"
     ];
 
     for (NSString *key in keys) {
