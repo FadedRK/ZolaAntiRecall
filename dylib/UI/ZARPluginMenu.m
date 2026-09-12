@@ -1,3 +1,6 @@
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
 #import "ZARPluginMenu.h"
 #import "../Core/ZARLogger.h"
 #import <objc/runtime.h>
@@ -198,3 +201,5 @@ void ZARInstallPluginMenuHook(void) {
         ZARLog(@"Plugin menu hook installed");
     });
 }
+
+#pragma clang diagnostic pop
