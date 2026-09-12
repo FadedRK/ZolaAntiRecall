@@ -212,6 +212,21 @@ static void ZARUpdateDBWhenRecalledChats(id self, SEL _cmd, id chats, id complet
 }
 
 static void ZARHandleRecall(id self, SEL _cmd, id arg) {
+    BOOL isOwnerRecall = NO;
+
+    if ([arg isKindOfClass:[NSNotification class]]) {
+        NSNotification *note = (NSNotification *)arg;
+        id flag = note.userInfo[@"isOwnerRecall"];
+        isOwnerRecall = [flag respondsToSelector:@selector(boolValue)] && [flag boolValue];
+    }
+
+    if (isOwnerRecall) {
+        ZARLog(@"BLOCKED self recall notification in handleRecallMessageNotification:");
+        ZARLogRecallArgument(@"BLOCKED-RECALL-NOTIFICATION", arg);
+        ZARLogCallStack(@"BLOCKED handleRecallMessageNotification:");
+        return;
+    }
+
     ZARTraceObjectCall(self, _cmd, arg, sel_registerName("zar_orig_handleRecallMessageNotification:"));
 }
 
