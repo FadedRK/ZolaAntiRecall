@@ -313,6 +313,8 @@ static BOOL ZARIsRecallPlaceholderMessage(id value) {
     return [lower containsString:@"recalled"] || [lower containsString:@"recalled message"];
 }
 
+static NSString *ZARStateAliasForSelector(SEL sel);
+
 static void ZARTraceSetMessage(id self, SEL _cmd, id value) {
     id flag = ZARSafeKVC(self, @"_isRecallDelByMySelf");
     id messageId = ZARSafeKVC(self, @"messageId");
