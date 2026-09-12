@@ -30,7 +30,30 @@ static void ZARSetEnabled(BOOL enabled) {
     ZARLog(@"Plugin enabled=%@", enabled ? @"YES" : @"NO");
 }
 
+static NSArray<UIWindow *> *ZARAllWindows(void) {
+    NSMutableArray<UIWindow *> *result = [NSMutableArray array];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (scene.activationState == UISceneActivationStateUnattached) continue;
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                if (!window.hidden && window.alpha > 0.01 && window.bounds.size.width > 0) {
+                    [result addObject:window];
+                }
+            }
+        }
+    } else {
+        for (UIWindow *window in UIApplication.sharedApplication.windows) {
+            if (!window.hidden && window.alpha > 0.01 && window.bounds.size.width > 0) {
+                [result addObject:window];
+            }
+        }
+    }
+    return result;
+}
+
 static UIView *ZARFindMenuView(UIView *root) {
+    if (!root || root.hidden || root.alpha < 0.05) return nil;
     CGRect bounds = root.bounds;
     CGFloat bw = CGRectGetWidth(bounds);
     CGFloat bh = CGRectGetHeight(bounds);
@@ -39,14 +62,15 @@ static UIView *ZARFindMenuView(UIView *root) {
     for (UIView *v in [root.subviews reverseObjectEnumerator]) {
         if (v.hidden || v.alpha < 0.05 || v.tag == ZARPanelTag) continue;
         CGRect f = [v.superview convertRect:v.frame toView:root];
-        BOOL plausible = CGRectGetWidth(f) >= bw * 0.45 &&
-                         CGRectGetWidth(f) <= bw * 0.90 &&
-                         CGRectGetHeight(f) >= 150 &&
-                         CGRectGetHeight(f) <= bh * 0.45 &&
-                         CGRectGetMinX(f) >= 5 &&
-                         CGRectGetMinX(f) <= bw * 0.35 &&
-                         CGRectGetMinY(f) >= 20 &&
-                         CGRectGetMinY(f) <= bh * 0.28;
+        CGFloat fw = CGRectGetWidth(f);
+        CGFloat fh = CGRectGetHeight(f);
+        CGFloat x = CGRectGetMinX(f);
+        CGFloat y = CGRectGetMinY(f);
+
+        BOOL plausible = fw >= bw * 0.55 && fw <= bw * 0.95 &&
+                         fh >= 250 && fh <= bh * 0.55 &&
+                         x >= 0 && x <= bw * 0.40 &&
+                         y >= 0 && y <= bh * 0.35;
         if (plausible) return v;
         UIView *deeper = ZARFindMenuView(v);
         if (deeper) return deeper;
@@ -56,18 +80,24 @@ static UIView *ZARFindMenuView(UIView *root) {
 
 static UIViewController *ZARTopViewController(void) {
     UIWindow *window = nil;
-    for (UIWindow *w in UIApplication.sharedApplication.windows) {
-        if (w.hidden || w.alpha < 0.01) continue;
+    for (UIWindow *w in ZARAllWindows()) {
         if (w.isKeyWindow) { window = w; break; }
         if (!window) window = w;
     }
     if (!window) return nil;
+
     UIViewController *vc = window.rootViewController;
     while (vc) {
         UIViewController *next = vc.presentedViewController;
         if (next && !next.isBeingDismissed) { vc = next; continue; }
-        if ([vc isKindOfClass:[UINavigationController class]]) { vc = [(UINavigationController *)vc visibleViewController]; continue; }
-        if ([vc isKindOfClass:[UITabBarController class]]) { vc = [(UITabBarController *)vc selectedViewController]; continue; }
+        if ([vc isKindOfClass:[UINavigationController class]]) {
+            UIViewController *visible = [(UINavigationController *)vc visibleViewController];
+            if (visible && visible != vc) { vc = visible; continue; }
+        }
+        if ([vc isKindOfClass:[UITabBarController class]]) {
+            UIViewController *selected = [(UITabBarController *)vc selectedViewController];
+            if (selected && selected != vc) { vc = selected; continue; }
+        }
         break;
     }
     return vc;
@@ -76,8 +106,8 @@ static UIViewController *ZARTopViewController(void) {
 static void ZARShowLogViewer(UIViewController *presenting) {
     if (!presenting) return;
     NSString *text = [NSString stringWithContentsOfFile:ZARLogPath() encoding:NSUTF8StringEncoding error:nil];
-    if (text.length == 0) text = @"暂无日志。\n\n请先重启 Zalo，然后操作一次 + 菜单或进行测试。";
-    if (text.length > 12000) text = [text substringFromIndex:text.length - 12000];
+    if (text.length == 0) text = @"暂无日志。\n\n请先操作一次 + 菜单或进行 Recall 测试。";
+    if (text.length > 16000) text = [text substringFromIndex:text.length - 16000];
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"ZolaAntiRecall 日志" message:nil preferredStyle:UIAlertControllerStyleAlert];
     UITextView *tv = [[UITextView alloc] initWithFrame:CGRectZero];
@@ -93,7 +123,7 @@ static void ZARShowLogViewer(UIViewController *presenting) {
         [tv.leadingAnchor constraintEqualToAnchor:alert.view.leadingAnchor constant:8],
         [tv.trailingAnchor constraintEqualToAnchor:alert.view.trailingAnchor constant:-8],
         [tv.topAnchor constraintEqualToAnchor:alert.view.topAnchor constant:55],
-        [tv.heightAnchor constraintEqualToConstant:260]
+        [tv.heightAnchor constraintEqualToConstant:280]
     ]];
     [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
     [presenting presentViewController:alert animated:YES completion:nil];
@@ -104,12 +134,15 @@ static void ZARAddPanelToMenu(UIView *menu) {
 
     UIWindow *window = menu.window;
     CGRect menuRect = [menu.superview convertRect:menu.frame toView:window];
+    CGFloat screenWidth = CGRectGetWidth(window.bounds);
+    CGFloat screenHeight = CGRectGetHeight(window.bounds);
     CGFloat width = CGRectGetWidth(menuRect);
-    if (width < 180) return;
     CGFloat x = CGRectGetMinX(menuRect);
     CGFloat y = CGRectGetMaxY(menuRect) + 6;
-    CGFloat maxWidth = CGRectGetWidth(window.bounds) - x - 10;
-    width = MIN(width, maxWidth);
+
+    if (width < 180) return;
+    width = MIN(width, screenWidth - x - 10);
+    if (width < 180 || y + 92 > screenHeight) return;
 
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(x, y, width, 92)];
     panel.tag = ZARPanelTag;
@@ -148,7 +181,7 @@ static void ZARAddPanelToMenu(UIView *menu) {
     [panel addSubview:logButton];
 
     [window addSubview:panel];
-    ZARLog(@"Plugin menu injected into + menu");
+    ZARLog(@"Plugin menu injected: %@ frame=%@", NSStringFromClass(menu.class), NSStringFromCGRect(menuRect));
 }
 
 @implementation ZARSwitchTarget
@@ -161,6 +194,18 @@ static void ZARAddPanelToMenu(UIView *menu) {
 - (void)open:(UIButton *)sender { ZARShowLogViewer(ZARTopViewController()); }
 @end
 
+static void ZARScanAllWindowsAndInstall(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (UIWindow *window in ZARAllWindows()) {
+            UIView *menu = ZARFindMenuView(window);
+            if (menu) {
+                ZARAddPanelToMenu(menu);
+                return;
+            }
+        }
+    });
+}
+
 @interface UIApplication (ZARPluginMenu)
 - (BOOL)zar_sendAction:(SEL)action to:(id)target from:(id)sender forEvent:(UIEvent *)event;
 @end
@@ -168,28 +213,15 @@ static void ZARAddPanelToMenu(UIView *menu) {
 @implementation UIApplication (ZARPluginMenu)
 - (BOOL)zar_sendAction:(SEL)action to:(id)target from:(id)sender forEvent:(UIEvent *)event {
     BOOL result = [self zar_sendAction:action to:target from:sender forEvent:event];
-    if ([sender isKindOfClass:[UIButton class]]) {
-        UIButton *button = (UIButton *)sender;
-        UIWindow *window = button.window;
-        if (window) {
-            CGRect f = [button.superview convertRect:button.frame toView:window];
-            CGSize s = window.bounds.size;
-            BOOL topRight = CGRectGetMidX(f) > s.width * 0.78 && CGRectGetMidY(f) < s.height * 0.16;
-            if (topRight) dispatch_async(dispatch_get_main_queue(), ^{ ZARInstallPluginMenuIfNeeded(); });
-        }
-    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ZARScanAllWindowsAndInstall();
+    });
     return result;
 }
 @end
 
 void ZARInstallPluginMenuIfNeeded(void) {
-    UIWindow *window = nil;
-    for (UIWindow *w in UIApplication.sharedApplication.windows) {
-        if (!w.hidden && w.alpha > 0.01 && w.isKeyWindow) { window = w; break; }
-    }
-    if (!window) return;
-    UIView *menu = ZARFindMenuView(window);
-    if (menu) ZARAddPanelToMenu(menu);
+    ZARScanAllWindowsAndInstall();
 }
 
 void ZARInstallPluginMenuHook(void) {
@@ -197,8 +229,22 @@ void ZARInstallPluginMenuHook(void) {
     dispatch_once(&once, ^{
         Method original = class_getInstanceMethod(UIApplication.class, @selector(sendAction:to:from:forEvent:));
         Method replacement = class_getInstanceMethod(UIApplication.class, @selector(zar_sendAction:to:from:forEvent:));
-        if (original && replacement) method_exchangeImplementations(original, replacement);
-        ZARLog(@"Plugin menu hook installed");
+        if (original && replacement) {
+            method_exchangeImplementations(original, replacement);
+            ZARLog(@"Plugin menu hook installed");
+        } else {
+            ZARLog(@"Plugin menu hook FAILED");
+        }
+    });
+
+    // Zalo may present the + menu without routing through sendAction:
+    // scan periodically for the first few seconds after injection.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (NSInteger i = 0; i < 30; i++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                ZARScanAllWindowsAndInstall();
+            });
+        }
     });
 }
 
