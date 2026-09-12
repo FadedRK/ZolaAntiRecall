@@ -42,12 +42,24 @@ static void ZARScanSelector(SEL sel) {
     free(classes);
 }
 
+void ZARRunMessageTrace(void) {
+    ZARLog(@"===== ZolaAntiRecall runtime discovery =====");
+    ZARLog(@"Process=%@ PID=%d", NSProcessInfo.processInfo.processName, NSProcessInfo.processInfo.processIdentifier);
+    for (NSString *name in ZARKeywords()) {
+        ZARScanSelector(NSSelectorFromString(name));
+    }
+    ZARLog(@"TRACE ONLY: no method implementations changed");
+}
+
+NSString *ZARDiagnosticText(void) {
+    NSString *text = [NSString stringWithContentsOfFile:ZARLogPath() encoding:NSUTF8StringEncoding error:nil];
+    if (!text.length) return @"暂无扫描日志。请点击“重新扫描”。";
+    if (text.length > 30000) text = [text substringFromIndex:text.length - 30000];
+    return text;
+}
+
 void ZARInstallMessageTrace(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        ZARLog(@"===== ZolaAntiRecall runtime discovery =====");
-        for (NSString *name in ZARKeywords()) {
-            ZARScanSelector(NSSelectorFromString(name));
-        }
-        ZARLog(@"TRACE ONLY: no method implementations changed");
+        ZARRunMessageTrace();
     });
 }
