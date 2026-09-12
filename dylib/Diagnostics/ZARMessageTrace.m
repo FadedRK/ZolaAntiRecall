@@ -42,14 +42,70 @@ static void ZARScanSelector(SEL sel) {
     free(classes);
 }
 
+static void ZARLogCallStack(NSString *label) {
+    NSArray<NSString *> *frames = [NSThread callStackSymbols];
+    NSUInteger count = MIN((NSUInteger)16, frames.count);
+    if (count == 0) return;
+    NSArray<NSString *> *slice = [frames subarrayWithRange:NSMakeRange(0, count)];
+    ZARLog(@"STACK %@\n%@", label, [slice componentsJoinedByString:@"\n"]);
+}
+
+static void ZARLogRecallArgument(NSString *label, id arg) {
+    if (!arg) {
+        ZARLog(@"%@ arg=(nil)", label);
+        return;
+    }
+
+    NSString *className = NSStringFromClass(object_getClass(arg));
+    if ([arg isKindOfClass:[NSDictionary class]]) {
+        NSArray *keys = [[(NSDictionary *)arg allKeys] valueForKey:@"description"];
+        ZARLog(@"%@ argClass=%@ dictionaryKeys=%@", label, className, keys);
+        return;
+    }
+
+    if ([arg isKindOfClass:[NSNotification class]]) {
+        NSNotification *note = (NSNotification *)arg;
+        NSArray *keys = [note.userInfo.allKeys valueForKey:@"description"];
+        ZARLog(@"%@ notificationName=%@ userInfoKeys=%@", label, note.name, keys);
+        return;
+    }
+
+    ZARLog(@"%@ argClass=%@ arg=%p", label, className, arg);
+}
+
 static void ZARTraceObjectCall(id self, SEL _cmd, id arg, SEL alias) {
+    NSString *selectorName = NSStringFromSelector(_cmd);
     ZARLog(@"CALL class=%@ selector=%@ argClass=%@ arg=%p",
            NSStringFromClass(object_getClass(self)),
-           NSStringFromSelector(_cmd),
+           selectorName,
            arg ? NSStringFromClass(object_getClass(arg)) : @"(nil)",
            arg);
+
+    if ([selectorName isEqualToString:@"handleRecallMessageNotification:"]) {
+        ZARLogRecallArgument(@"RECALL-NOTIFICATION", arg);
+    } else if ([selectorName isEqualToString:@"_handleRecallWithData:"]) {
+        ZARLogRecallArgument(@"RECALL-DATA", arg);
+        ZARLogCallStack(@"_handleRecallWithData:");
+    }
+
     void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))[self methodForSelector:alias];
     if (orig) orig(self, alias, arg);
+}
+
+static void ZARUpdateDBWhenRecalledChats(id self, SEL _cmd, id chats, id completion) {
+    ZARLog(@"CALL class=%@ selector=%@ chatsClass=%@ chats=%p completion=%p",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           chats ? NSStringFromClass(object_getClass(chats)) : @"(nil)",
+           chats,
+           completion);
+
+    ZARLogRecallArgument(@"RECALL-DB-ARG", chats);
+    ZARLogCallStack(@"updateDBWhenRecalledChats:completion:");
+
+    void (*orig)(id, SEL, id, id) =
+        (void (*)(id, SEL, id, id))[self methodForSelector:sel_registerName("zar_orig_updateDBWhenRecalledChats:completion:")];
+    if (orig) orig(self, sel_registerName("zar_orig_updateDBWhenRecalledChats:completion:"), chats, completion);
 }
 
 static void ZARHandleRecall(id self, SEL _cmd, id arg) {
@@ -89,6 +145,7 @@ static void ZARInstallInvocationTrace(void) {
     Class data = NSClassFromString(@"MSDataCoordinator");
     Class cache = NSClassFromString(@"MSLocalCache");
     Class entity = NSClassFromString(@"ChatEntity");
+    Class conversation = NSClassFromString(@"ConversationModel");
 
     ZARInstallObjectHook(data,
                          @selector(handleRecallMessageNotification:),
@@ -110,6 +167,11 @@ static void ZARInstallInvocationTrace(void) {
                          sel_registerName("zar_orig_set_recallTime:"),
                          (IMP)ZARSetRecallTime,
                          "v24@0:8q16");
+    ZARInstallObjectHook(conversation,
+                         @selector(updateDBWhenRecalledChats:completion:),
+                         sel_registerName("zar_orig_updateDBWhenRecalledChats:completion:"),
+                         (IMP)ZARUpdateDBWhenRecalledChats,
+                         "v32@0:8@16@?24");
 }
 
 void ZARRunMessageTrace(void) {
