@@ -50,6 +50,24 @@ static void ZARLogCallStack(NSString *label) {
     ZARLog(@"STACK %@\n%@", label, [slice componentsJoinedByString:@"\n"]);
 }
 
+static void ZARLogRecallDictionary(NSString *label, NSDictionary *dict) {
+    if (!dict) {
+        ZARLog(@"%@ dictionary=(nil)", label);
+        return;
+    }
+
+    id messageId = dict[@"messageId"];
+    id isGroup = dict[@"isGroup"];
+    id isOwnerRecall = dict[@"isOwnerRecall"];
+
+    ZARLog(@"%@ messageId=%@ isGroup=%@ isOwnerRecall=%@ keys=%@",
+           label,
+           messageId ?: @"(nil)",
+           isGroup ?: @"(nil)",
+           isOwnerRecall ?: @"(nil)",
+           [[dict allKeys] valueForKey:@"description"]);
+}
+
 static void ZARLogRecallArgument(NSString *label, id arg) {
     if (!arg) {
         ZARLog(@"%@ arg=(nil)", label);
@@ -57,20 +75,40 @@ static void ZARLogRecallArgument(NSString *label, id arg) {
     }
 
     NSString *className = NSStringFromClass(object_getClass(arg));
+
     if ([arg isKindOfClass:[NSDictionary class]]) {
-        NSArray *keys = [[(NSDictionary *)arg allKeys] valueForKey:@"description"];
-        ZARLog(@"%@ argClass=%@ dictionaryKeys=%@", label, className, keys);
+        ZARLogRecallDictionary(label, (NSDictionary *)arg);
         return;
     }
 
     if ([arg isKindOfClass:[NSNotification class]]) {
         NSNotification *note = (NSNotification *)arg;
-        NSArray *keys = [note.userInfo.allKeys valueForKey:@"description"];
-        ZARLog(@"%@ notificationName=%@ userInfoKeys=%@", label, note.name, keys);
+        ZARLog(@"%@ notificationName=%@", label, note.name);
+        if ([note.userInfo isKindOfClass:[NSDictionary class]]) {
+            ZARLogRecallDictionary([label stringByAppendingString:@" userInfo"], note.userInfo);
+        }
         return;
     }
 
-    ZARLog(@"%@ argClass=%@ arg=%p", label, className, arg);
+    if ([arg isKindOfClass:[NSArray class]]) {
+        NSArray *array = (NSArray *)arg;
+        ZARLog(@"%@ arrayClass=%@ count=%lu", label, className, (unsigned long)array.count);
+        NSUInteger index = 0;
+        for (id item in array) {
+            if (index >= 8) {
+                ZARLog(@"%@ ... truncated at 8 items", label);
+                break;
+            }
+            ZARLog(@"%@ item[%lu] class=%@ desc=%@", label,
+                   (unsigned long)index,
+                   item ? NSStringFromClass(object_getClass(item)) : @"(nil)",
+                   item ? [item description] : @"(nil)");
+            index++;
+        }
+        return;
+    }
+
+    ZARLog(@"%@ argClass=%@ arg=%p desc=%@", label, className, arg, [arg description]);
 }
 
 static void ZARTraceObjectCall(id self, SEL _cmd, id arg, SEL alias) {
@@ -83,6 +121,9 @@ static void ZARTraceObjectCall(id self, SEL _cmd, id arg, SEL alias) {
 
     if ([selectorName isEqualToString:@"handleRecallMessageNotification:"]) {
         ZARLogRecallArgument(@"RECALL-NOTIFICATION", arg);
+        if ([arg isKindOfClass:[NSNotification class]]) {
+            ZARLogCallStack(@"handleRecallMessageNotification:");
+        }
     } else if ([selectorName isEqualToString:@"_handleRecallWithData:"]) {
         ZARLogRecallArgument(@"RECALL-DATA", arg);
         ZARLogCallStack(@"_handleRecallWithData:");
