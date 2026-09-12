@@ -56,8 +56,28 @@ static void ZARHandleRecall(id self, SEL _cmd, id arg) {
     ZARTraceObjectCall(self, _cmd, arg, sel_registerName("zar_orig_handleRecallMessageNotification:"));
 }
 
+static BOOL ZARIsOwnerRecallData(id arg) {
+    if (![arg isKindOfClass:[NSDictionary class]]) return NO;
+    id value = [(NSDictionary *)arg objectForKey:@"isOwnerRecall"];
+    if (![value respondsToSelector:@selector(boolValue)]) return NO;
+    return [value boolValue];
+}
+
 static void ZARHandleRecallWithData(id self, SEL _cmd, id arg) {
-    ZARTraceObjectCall(self, _cmd, arg, sel_registerName("zar_orig__handleRecallWithData:"));
+    BOOL isOwnerRecall = ZARIsOwnerRecallData(arg);
+    ZARLog(@"CALL class=%@ selector=%@ argClass=%@ arg=%p isOwnerRecall=%d",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           arg ? NSStringFromClass(object_getClass(arg)) : @"(nil)",
+           arg,
+           isOwnerRecall);
+    if (isOwnerRecall) {
+        ZARLog(@"BLOCKED owner recall in _handleRecallWithData:");
+        return;
+    }
+    SEL alias = sel_registerName("zar_orig__handleRecallWithData:");
+    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))[self methodForSelector:alias];
+    if (orig) orig(self, alias, arg);
 }
 
 static void ZARSetRecallTime(id self, SEL _cmd, long long value) {
