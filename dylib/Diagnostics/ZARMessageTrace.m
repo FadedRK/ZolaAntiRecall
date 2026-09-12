@@ -238,6 +238,16 @@ static void ZARSetRecallTime(id self, SEL _cmd, long long value) {
     ZARLog(@"CALL class=%@ selector=%@ value=%lld",
            NSStringFromClass(object_getClass(self)),
            NSStringFromSelector(_cmd), value);
+
+    id selfRecallFlag = ZARSafeKVC(self, @"_isRecallDelByMySelf");
+    BOOL isSelfRecall = [selfRecallFlag respondsToSelector:@selector(boolValue)] && [selfRecallFlag boolValue];
+
+    if (isSelfRecall) {
+        ZARLog(@"BLOCKED self recall set_recallTime: value=%lld", value);
+        ZARLogCallStack(@"BLOCKED set_recallTime:");
+        return;
+    }
+
     SEL alias = sel_registerName("zar_orig_set_recallTime:");
     void (*orig)(id, SEL, long long) = (void (*)(id, SEL, long long))[self methodForSelector:alias];
     if (orig) orig(self, alias, value);
