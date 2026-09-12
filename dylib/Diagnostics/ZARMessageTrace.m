@@ -266,6 +266,48 @@ static void ZARTraceStateBool(id self, SEL _cmd, BOOL value) {
     if (orig) orig(self, alias, value);
 }
 
+static BOOL ZARIsRecallPlaceholderMessage(id value) {
+    if (![value isKindOfClass:[NSString class]]) return NO;
+    NSString *s = [(NSString *)value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!s.length) return NO;
+
+    NSSet<NSString *> *known = [NSSet setWithObjects:
+        @"Tin nhắn đã được thu hồi",
+        @"消息被召回",
+        @"This message was recalled",
+        @"Message was recalled",
+        @"The message was recalled",
+        nil
+    ];
+    if ([known containsObject:s]) return YES;
+
+    NSString *lower = s.lowercaseString;
+    return [lower containsString:@"recalled"] || [lower containsString:@"recalled message"];
+}
+
+static void ZARTraceSetMessage(id self, SEL _cmd, id value) {
+    id flag = ZARSafeKVC(self, @"_isRecallDelByMySelf");
+    BOOL selfRecall = [flag respondsToSelector:@selector(boolValue)] && [flag boolValue];
+
+    ZARLog(@"STATE-CALL class=%@ selector=%@ valueClass=%@ value=%@ selfRecallFlag=%@",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           value ? NSStringFromClass(object_getClass(value)) : @"(nil)",
+           value ?: @"(nil)",
+           flag ?: @"(nil)");
+
+    if (selfRecall && ZARIsRecallPlaceholderMessage(value)) {
+        ZARLog(@"BLOCKED recall placeholder setMessage: messageId=%@ value=%@",
+               ZARSafeKVC(self, @"messageId") ?: @"(nil)", value ?: @"(nil)");
+        ZARLogCallStack(@"BLOCKED setMessage:");
+        return;
+    }
+
+    SEL alias = NSSelectorFromString(ZARStateAliasForSelector(_cmd));
+    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))[self methodForSelector:alias];
+    if (orig) orig(self, alias, value);
+}
+
 static void ZARTraceStateLongLong(id self, SEL _cmd, long long value) {
     ZARLog(@"STATE-CALL class=%@ selector=%@ value=%lld",
            NSStringFromClass(object_getClass(self)),
@@ -374,6 +416,21 @@ static void ZARInstallInvocationTrace(void) {
                          sel_registerName("zar_orig_updateDBWhenRecalledChats:completion:"),
                          (IMP)ZARUpdateDBWhenRecalledChats,
                          "v32@0:8@16@?24");
+    Method setMessageMethod = class_getInstanceMethod(entity, @selector(setMessage:));
+    if (setMessageMethod) {
+        const char *types = method_getTypeEncoding(setMessageMethod);
+        SEL alias = sel_registerName("zar_orig_state_setMessage_");
+        if (types && strcmp(types, "v24@0:8@16") == 0 && !class_getInstanceMethod(entity, alias)) {
+            class_addMethod(entity, alias, method_getImplementation(setMessageMethod), types);
+            method_setImplementation(setMessageMethod, (IMP)ZARTraceSetMessage);
+            ZARLog(@"STATE-HOOKED class=%@ selector=setMessage: types=%s alias=%@",
+                   NSStringFromClass(entity), types, NSStringFromSelector(alias));
+        } else {
+            ZARLog(@"STATE-SKIP setMessage: types=%s expected=v24@0:8@16",
+                   types ?: "(null)");
+        }
+    }
+
     ZARScanStateMethodsForClass(entity);
     ZARInstallStateMutationTraceForClass(entity);
     ZARScanStateMethodsForClass(singleConversation);
