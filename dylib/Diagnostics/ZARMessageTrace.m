@@ -133,6 +133,43 @@ static void ZARTraceObjectCall(id self, SEL _cmd, id arg, SEL alias) {
     if (orig) orig(self, alias, arg);
 }
 
+static id ZARSafeKVC(id obj, NSString *key) {
+    @try {
+        return [obj valueForKey:key];
+    } @catch (__unused NSException *e) {
+        return nil;
+    }
+}
+
+static void ZARDumpChatEntity(id obj, NSString *prefix) {
+    if (!obj) return;
+    ZARLog(@"%@ ChatEntity=%p class=%@", prefix, obj, NSStringFromClass(object_getClass(obj)));
+
+    NSArray<NSString *> *keys = @[
+        @"messageId", @"messageID", @"msgId", @"msgID",
+        @"recallTime", @"recall_time", @"isRecall", @"isRecalled",
+        @"isOwnerRecall", @"ownerRecall", @"message_recall",
+        @"recalled_message", @"chatId", @"conversationId"
+    ];
+
+    for (NSString *key in keys) {
+        id value = ZARSafeKVC(obj, key);
+        if (value) {
+            ZARLog(@"%@ KVC %@=%@", prefix, key, value);
+        }
+    }
+
+    unsigned int count = 0;
+    objc_property_t *props = class_copyPropertyList(object_getClass(obj), &count);
+    NSMutableArray *names = [NSMutableArray array];
+    for (unsigned int i = 0; i < count; i++) {
+        const char *name = property_getName(props[i]);
+        if (name) [names addObject:[NSString stringWithUTF8String:name]];
+    }
+    free(props);
+    ZARLog(@"%@ properties=%@", prefix, names);
+}
+
 static void ZARUpdateDBWhenRecalledChats(id self, SEL _cmd, id chats, id completion) {
     ZARLog(@"CALL class=%@ selector=%@ chatsClass=%@ chats=%p completion=%p",
            NSStringFromClass(object_getClass(self)),
@@ -142,6 +179,13 @@ static void ZARUpdateDBWhenRecalledChats(id self, SEL _cmd, id chats, id complet
            completion);
 
     ZARLogRecallArgument(@"RECALL-DB-ARG", chats);
+    if ([chats isKindOfClass:[NSArray class]]) {
+        NSUInteger index = 0;
+        for (id item in (NSArray *)chats) {
+            if (index++ >= 4) break;
+            ZARDumpChatEntity(item, @"RECALL-DB-ITEM");
+        }
+    }
     ZARLogCallStack(@"updateDBWhenRecalledChats:completion:");
 
     void (*orig)(id, SEL, id, id) =
