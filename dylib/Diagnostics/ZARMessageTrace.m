@@ -111,6 +111,8 @@ static void ZARLogRecallArgument(NSString *label, id arg) {
     ZARLog(@"%@ argClass=%@ arg=%p desc=%@", label, className, arg, [arg description]);
 }
 
+static id ZARSafeKVC(id obj, NSString *key);
+
 static void ZARTraceObjectCall(id self, SEL _cmd, id arg, SEL alias) {
     NSString *selectorName = NSStringFromSelector(_cmd);
     ZARLog(@"CALL class=%@ selector=%@ argClass=%@ arg=%p",
