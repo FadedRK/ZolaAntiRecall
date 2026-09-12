@@ -42,6 +42,25 @@ static void ZARScanSelector(SEL sel) {
     free(classes);
 }
 
+static NSMutableSet<NSString *> *ZARPendingSelfRecallIDs(void) {
+    static NSMutableSet<NSString *> *set;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        set = [NSMutableSet set];
+    });
+    return set;
+}
+
+static NSString *ZARMessageIDKey(id messageId) {
+    if (!messageId) return nil;
+    @try {
+        NSString *desc = [messageId description];
+        return desc.length ? desc : nil;
+    } @catch (__unused NSException *e) {
+        return nil;
+    }
+}
+
 static void ZARLogCallStack(NSString *label) {
     NSArray<NSString *> *frames = [NSThread callStackSymbols];
     NSUInteger count = MIN((NSUInteger)16, frames.count);
@@ -209,6 +228,8 @@ static void ZARHandleRecallWithData(id self, SEL _cmd, id arg) {
 static void ZARSetRecallTime(id self, SEL _cmd, long long value) {
     id selfRecallFlag = ZARSafeKVC(self, @"_isRecallDelByMySelf");
     id messageId = ZARSafeKVC(self, @"messageId");
+    NSString *key = ZARMessageIDKey(messageId);
+    BOOL isSelfRecall = [selfRecallFlag respondsToSelector:@selector(boolValue)] && [selfRecallFlag boolValue];
 
     ZARLog(@"CALL class=%@ selector=%@ value=%lld selfRecallFlag=%@ messageId=%@",
            NSStringFromClass(object_getClass(self)),
@@ -216,6 +237,13 @@ static void ZARSetRecallTime(id self, SEL _cmd, long long value) {
            value,
            selfRecallFlag ?: @"(nil)",
            messageId ?: @"(nil)");
+
+    if (isSelfRecall && key.length) {
+        @synchronized (ZARPendingSelfRecallIDs()) {
+            [ZARPendingSelfRecallIDs() addObject:key];
+        }
+        ZARLog(@"MARKED pending self recall messageId=%@", messageId);
+    }
     ZARLogCallStack(@"set_recallTime:");
 
     SEL alias = sel_registerName("zar_orig_set_recallTime:");
@@ -287,18 +315,29 @@ static BOOL ZARIsRecallPlaceholderMessage(id value) {
 
 static void ZARTraceSetMessage(id self, SEL _cmd, id value) {
     id flag = ZARSafeKVC(self, @"_isRecallDelByMySelf");
+    id messageId = ZARSafeKVC(self, @"messageId");
+    NSString *key = ZARMessageIDKey(messageId);
     BOOL selfRecall = [flag respondsToSelector:@selector(boolValue)] && [flag boolValue];
+    BOOL pending = NO;
 
-    ZARLog(@"STATE-CALL class=%@ selector=%@ valueClass=%@ value=%@ selfRecallFlag=%@",
+    if (key.length) {
+        @synchronized (ZARPendingSelfRecallIDs()) {
+            pending = [ZARPendingSelfRecallIDs() containsObject:key];
+        }
+    }
+
+    ZARLog(@"STATE-CALL class=%@ selector=%@ valueClass=%@ value=%@ selfRecallFlag=%@ pendingSelfRecall=%d messageId=%@",
            NSStringFromClass(object_getClass(self)),
            NSStringFromSelector(_cmd),
            value ? NSStringFromClass(object_getClass(value)) : @"(nil)",
            value ?: @"(nil)",
-           flag ?: @"(nil)");
+           flag ?: @"(nil)",
+           pending ? 1 : 0,
+           messageId ?: @"(nil)");
 
-    if (selfRecall && ZARIsRecallPlaceholderMessage(value)) {
+    if ((selfRecall || pending) && ZARIsRecallPlaceholderMessage(value)) {
         ZARLog(@"BLOCKED recall placeholder setMessage: messageId=%@ value=%@",
-               ZARSafeKVC(self, @"messageId") ?: @"(nil)", value ?: @"(nil)");
+               messageId ?: @"(nil)", value ?: @"(nil)");
         ZARLogCallStack(@"BLOCKED setMessage:");
         return;
     }
@@ -308,15 +347,6 @@ static void ZARTraceSetMessage(id self, SEL _cmd, id value) {
     if (orig) orig(self, alias, value);
 }
 
-static void ZARTraceStateLongLong(id self, SEL _cmd, long long value) {
-    ZARLog(@"STATE-CALL class=%@ selector=%@ value=%lld",
-           NSStringFromClass(object_getClass(self)),
-           NSStringFromSelector(_cmd),
-           value);
-    SEL alias = NSSelectorFromString(ZARStateAliasForSelector(_cmd));
-    void (*orig)(id, SEL, long long) = (void (*)(id, SEL, long long))[self methodForSelector:alias];
-    if (orig) orig(self, alias, value);
-}
 
 static BOOL ZARShouldTraceStateSelector(NSString *name) {
     NSString *lower = name.lowercaseString;
