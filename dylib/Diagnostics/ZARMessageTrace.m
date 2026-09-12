@@ -294,6 +294,17 @@ static void ZARTraceStateBool(id self, SEL _cmd, BOOL value) {
     if (orig) orig(self, alias, value);
 }
 
+static void ZARTraceStateLongLong(id self, SEL _cmd, long long value) {
+    ZARLog(@"STATE-CALL class=%@ selector=%@ value=%lld",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           value);
+    SEL alias = NSSelectorFromString(ZARStateAliasForSelector(_cmd));
+    void (*orig)(id, SEL, long long) =
+        (void (*)(id, SEL, long long))[self methodForSelector:alias];
+    if (orig) orig(self, alias, value);
+}
+
 static BOOL ZARIsRecallPlaceholderMessage(id value) {
     if (![value isKindOfClass:[NSString class]]) return NO;
     NSString *s = [(NSString *)value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
