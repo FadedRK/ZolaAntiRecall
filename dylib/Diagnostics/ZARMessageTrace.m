@@ -237,22 +237,24 @@ static void ZARHandleRecallWithData(id self, SEL _cmd, id arg) {
 }
 
 static void ZARSetRecallTime(id self, SEL _cmd, long long value) {
-    ZARLog(@"CALL class=%@ selector=%@ value=%lld",
-           NSStringFromClass(object_getClass(self)),
-           NSStringFromSelector(_cmd), value);
-
     id selfRecallFlag = ZARSafeKVC(self, @"_isRecallDelByMySelf");
-    BOOL isSelfRecall = [selfRecallFlag respondsToSelector:@selector(boolValue)] && [selfRecallFlag boolValue];
+    id messageId = ZARSafeKVC(self, @"messageId");
 
-    if (isSelfRecall) {
-        ZARLog(@"BLOCKED self recall set_recallTime: value=%lld", value);
-        ZARLogCallStack(@"BLOCKED set_recallTime:");
-        return;
-    }
+    ZARLog(@"CALL class=%@ selector=%@ value=%lld selfRecallFlag=%@ messageId=%@",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           value,
+           selfRecallFlag ?: @"(nil)",
+           messageId ?: @"(nil)");
+    ZARLogCallStack(@"set_recallTime:");
 
-    SEL alias = sel_registerName("zar_orig_set_recallTime:");
-    void (*orig)(id, SEL, long long) = (void (*)(id, SEL, long long))[self methodForSelector:alias];
-    if (orig) orig(self, alias, value);
+    // Experimental: the self-recall flag is populated later in the flow,
+    // so it is not reliable at this earliest mutation point.
+    // Block the recall-time mutation itself to prevent the in-memory message
+    // from immediately transitioning to the recalled state.
+    ZARLog(@"BLOCKED recall-time mutation for messageId=%@ value=%lld",
+           messageId ?: @"(nil)", value);
+    return;
 }
 
 static void ZARInstallObjectHook(Class cls, SEL sel, SEL alias, IMP replacement, const char *expectedTypes) {
