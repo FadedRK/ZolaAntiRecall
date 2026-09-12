@@ -11,20 +11,36 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Setup Theos
-        uses: leancodept/theos-action@v1
+        uses: Randomblock1/theos-action@v1
         with:
-          theos-src: https://github.com/theos/theos.git
-      - name: Build
-        run: make -C dylib clean package FINALPACKAGE=1
-      - name: Verify
+          theos-src: https://github.com/theos/theos
+          theos-sdks: https://github.com/theos/sdks
+
+      - name: Show toolchain
         run: |
-          find dylib -name 'ZolaAntiRecall.dylib' -o -name '*.deb' -o -name '*.zip'
-      - name: Upload
+          echo "THEOS=$THEOS"
+          xcodebuild -version
+          clang --version
+
+      - name: Build dylib
+        run: |
+          make -C dylib clean
+          make -C dylib FINALPACKAGE=1
+
+      - name: Verify output
+        run: |
+          echo "=== Build outputs ==="
+          find dylib -type f \( -name 'ZolaAntiRecall.dylib' -o -name '*.deb' \) -print
+          test -n "$(find dylib -type f -name 'ZolaAntiRecall.dylib' -print -quit)"
+
+      - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: ZolaAntiRecall-dylib
           path: |
             dylib/.theos/obj/**/ZolaAntiRecall.dylib
+            dylib/.theos/obj/**/ZolaAntiRecall.dylib.dSYM
             dylib/packages/*
           if-no-files-found: error
