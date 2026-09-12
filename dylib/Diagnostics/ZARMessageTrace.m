@@ -42,13 +42,84 @@ static void ZARScanSelector(SEL sel) {
     free(classes);
 }
 
+static void ZARTraceObjectCall(id self, SEL _cmd, id arg, SEL alias) {
+    ZARLog(@"CALL class=%@ selector=%@ argClass=%@ arg=%p",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           arg ? NSStringFromClass(object_getClass(arg)) : @"(nil)",
+           arg);
+    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))[self methodForSelector:alias];
+    if (orig) orig(self, alias, arg);
+}
+
+static void ZARHandleRecall(id self, SEL _cmd, id arg) {
+    ZARTraceObjectCall(self, _cmd, arg, sel_registerName("zar_orig_handleRecallMessageNotification:"));
+}
+
+static void ZARHandleRecallWithData(id self, SEL _cmd, id arg) {
+    ZARTraceObjectCall(self, _cmd, arg, sel_registerName("zar_orig__handleRecallWithData:"));
+}
+
+static void ZARSetRecallTime(id self, SEL _cmd, long long value) {
+    ZARLog(@"CALL class=%@ selector=%@ value=%lld",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd), value);
+    SEL alias = sel_registerName("zar_orig_set_recallTime:");
+    void (*orig)(id, SEL, long long) = (void (*)(id, SEL, long long))[self methodForSelector:alias];
+    if (orig) orig(self, alias, value);
+}
+
+static void ZARInstallObjectHook(Class cls, SEL sel, SEL alias, IMP replacement, const char *expectedTypes) {
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method) return;
+    const char *types = method_getTypeEncoding(method);
+    if (!types || strcmp(types, expectedTypes) != 0) {
+        ZARLog(@"SKIP hook class=%@ selector=%@ types=%s expected=%s",
+               NSStringFromClass(cls), NSStringFromSelector(sel), types ?: "(null)", expectedTypes);
+        return;
+    }
+    if (class_getInstanceMethod(cls, alias)) return;
+    class_addMethod(cls, alias, method_getImplementation(method), types);
+    method_setImplementation(method, replacement);
+    ZARLog(@"HOOKED class=%@ selector=%@ types=%s alias=%@",
+           NSStringFromClass(cls), NSStringFromSelector(sel), types, NSStringFromSelector(alias));
+}
+
+static void ZARInstallInvocationTrace(void) {
+    Class data = NSClassFromString(@"MSDataCoordinator");
+    Class cache = NSClassFromString(@"MSLocalCache");
+    Class entity = NSClassFromString(@"ChatEntity");
+
+    ZARInstallObjectHook(data,
+                         @selector(handleRecallMessageNotification:),
+                         sel_registerName("zar_orig_handleRecallMessageNotification:"),
+                         (IMP)ZARHandleRecall,
+                         "v24@0:8@16");
+    ZARInstallObjectHook(cache,
+                         @selector(handleRecallMessageNotification:),
+                         sel_registerName("zar_orig_handleRecallMessageNotification:"),
+                         (IMP)ZARHandleRecall,
+                         "v24@0:8@16");
+    ZARInstallObjectHook(data,
+                         NSSelectorFromString(@"_handleRecallWithData:"),
+                         sel_registerName("zar_orig__handleRecallWithData:"),
+                         (IMP)ZARHandleRecallWithData,
+                         "v24@0:8@16");
+    ZARInstallObjectHook(entity,
+                         @selector(set_recallTime:),
+                         sel_registerName("zar_orig_set_recallTime:"),
+                         (IMP)ZARSetRecallTime,
+                         "v24@0:8q16");
+}
+
 void ZARRunMessageTrace(void) {
     ZARLog(@"===== ZolaAntiRecall runtime discovery =====");
     ZARLog(@"Process=%@ PID=%d", NSProcessInfo.processInfo.processName, NSProcessInfo.processInfo.processIdentifier);
     for (NSString *name in ZARKeywords()) {
         ZARScanSelector(NSSelectorFromString(name));
     }
-    ZARLog(@"TRACE ONLY: no method implementations changed");
+    ZARInstallInvocationTrace();
+    ZARLog(@"INVOCATION TRACE installed; originals are still called; no recall blocking");
 }
 
 NSString *ZARDiagnosticText(void) {
