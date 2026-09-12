@@ -183,22 +183,6 @@ static void ZARUpdateDBWhenRecalledChats(id self, SEL _cmd, id chats, id complet
            completion);
 
     ZARLogRecallArgument(@"RECALL-DB-ARG", chats);
-
-    BOOL blockSelfRecall = NO;
-    id target = nil;
-    if ([chats isKindOfClass:[NSArray class]] && [(NSArray *)chats count] > 0) {
-        target = [(NSArray *)chats firstObject];
-        id flag = ZARSafeKVC(target, @"_isRecallDelByMySelf");
-        blockSelfRecall = [flag respondsToSelector:@selector(boolValue)] && [flag boolValue];
-    }
-
-    if (blockSelfRecall) {
-        ZARLog(@"BLOCKED self recall in updateDBWhenRecalledChats:completion: message=%@",
-               ZARSafeKVC(target, @"messageId") ?: @"(nil)");
-        ZARLogCallStack(@"BLOCKED updateDBWhenRecalledChats:completion:");
-        return;
-    }
-
     if ([chats isKindOfClass:[NSArray class]]) {
         NSUInteger index = 0;
         for (id item in (NSArray *)chats) {
@@ -208,27 +192,13 @@ static void ZARUpdateDBWhenRecalledChats(id self, SEL _cmd, id chats, id complet
     }
     ZARLogCallStack(@"updateDBWhenRecalledChats:completion:");
 
+    SEL alias = sel_registerName("zar_orig_updateDBWhenRecalledChats:completion:");
     void (*orig)(id, SEL, id, id) =
-        (void (*)(id, SEL, id, id))[self methodForSelector:sel_registerName("zar_orig_updateDBWhenRecalledChats:completion:")];
-    if (orig) orig(self, sel_registerName("zar_orig_updateDBWhenRecalledChats:completion:"), chats, completion);
+        (void (*)(id, SEL, id, id))[self methodForSelector:alias];
+    if (orig) orig(self, alias, chats, completion);
 }
 
 static void ZARHandleRecall(id self, SEL _cmd, id arg) {
-    BOOL isOwnerRecall = NO;
-
-    if ([arg isKindOfClass:[NSNotification class]]) {
-        NSNotification *note = (NSNotification *)arg;
-        id flag = note.userInfo[@"isOwnerRecall"];
-        isOwnerRecall = [flag respondsToSelector:@selector(boolValue)] && [flag boolValue];
-    }
-
-    if (isOwnerRecall) {
-        ZARLog(@"BLOCKED self recall notification in handleRecallMessageNotification:");
-        ZARLogRecallArgument(@"BLOCKED-RECALL-NOTIFICATION", arg);
-        ZARLogCallStack(@"BLOCKED handleRecallMessageNotification:");
-        return;
-    }
-
     ZARTraceObjectCall(self, _cmd, arg, sel_registerName("zar_orig_handleRecallMessageNotification:"));
 }
 
@@ -248,13 +218,10 @@ static void ZARSetRecallTime(id self, SEL _cmd, long long value) {
            messageId ?: @"(nil)");
     ZARLogCallStack(@"set_recallTime:");
 
-    // Experimental: the self-recall flag is populated later in the flow,
-    // so it is not reliable at this earliest mutation point.
-    // Block the recall-time mutation itself to prevent the in-memory message
-    // from immediately transitioning to the recalled state.
-    ZARLog(@"BLOCKED recall-time mutation for messageId=%@ value=%lld",
-           messageId ?: @"(nil)", value);
-    return;
+    SEL alias = sel_registerName("zar_orig_set_recallTime:");
+    void (*orig)(id, SEL, long long) =
+        (void (*)(id, SEL, long long))[self methodForSelector:alias];
+    if (orig) orig(self, alias, value);
 }
 
 static void ZARInstallObjectHook(Class cls, SEL sel, SEL alias, IMP replacement, const char *expectedTypes) {
@@ -273,11 +240,114 @@ static void ZARInstallObjectHook(Class cls, SEL sel, SEL alias, IMP replacement,
            NSStringFromClass(cls), NSStringFromSelector(sel), types, NSStringFromSelector(alias));
 }
 
+static NSString *ZARStateAliasForSelector(SEL sel) {
+    NSString *name = NSStringFromSelector(sel);
+    return [@"zar_orig_state_" stringByAppendingString:[name stringByReplacingOccurrencesOfString:@":" withString:@"_"]];
+}
+
+static void ZARTraceStateObject(id self, SEL _cmd, id value) {
+    ZARLog(@"STATE-CALL class=%@ selector=%@ valueClass=%@ value=%@",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           value ? NSStringFromClass(object_getClass(value)) : @"(nil)",
+           value ?: @"(nil)");
+    SEL alias = NSSelectorFromString(ZARStateAliasForSelector(_cmd));
+    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))[self methodForSelector:alias];
+    if (orig) orig(self, alias, value);
+}
+
+static void ZARTraceStateBool(id self, SEL _cmd, BOOL value) {
+    ZARLog(@"STATE-CALL class=%@ selector=%@ bool=%d",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           value ? 1 : 0);
+    SEL alias = NSSelectorFromString(ZARStateAliasForSelector(_cmd));
+    void (*orig)(id, SEL, BOOL) = (void (*)(id, SEL, BOOL))[self methodForSelector:alias];
+    if (orig) orig(self, alias, value);
+}
+
+static void ZARTraceStateLongLong(id self, SEL _cmd, long long value) {
+    ZARLog(@"STATE-CALL class=%@ selector=%@ value=%lld",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           value);
+    SEL alias = NSSelectorFromString(ZARStateAliasForSelector(_cmd));
+    void (*orig)(id, SEL, long long) = (void (*)(id, SEL, long long))[self methodForSelector:alias];
+    if (orig) orig(self, alias, value);
+}
+
+static BOOL ZARShouldTraceStateSelector(NSString *name) {
+    NSString *lower = name.lowercaseString;
+    return [lower hasPrefix:@"set"] &&
+           ([lower containsString:@"recall"] ||
+            [lower containsString:@"delete"] ||
+            [lower containsString:@"status"] ||
+            [lower containsString:@"message"] ||
+            [lower containsString:@"origintext"]);
+}
+
+static void ZARInstallStateMutationTraceForClass(Class cls) {
+    if (!cls) return;
+
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    for (unsigned int i = 0; i < count; i++) {
+        Method method = methods[i];
+        SEL sel = method_getName(method);
+        NSString *name = NSStringFromSelector(sel);
+        if (!ZARShouldTraceStateSelector(name)) continue;
+
+        const char *types = method_getTypeEncoding(method);
+        if (!types) continue;
+
+        NSString *aliasName = ZARStateAliasForSelector(sel);
+        SEL alias = NSSelectorFromString(aliasName);
+        if (class_getInstanceMethod(cls, alias)) continue;
+
+        IMP replacement = NULL;
+        if (strcmp(types, "v24@0:8@16") == 0) {
+            replacement = (IMP)ZARTraceStateObject;
+        } else if (strcmp(types, "v24@0:8B16") == 0) {
+            replacement = (IMP)ZARTraceStateBool;
+        } else if (strcmp(types, "v24@0:8q16") == 0 ||
+                   strcmp(types, "v24@0:8Q16") == 0) {
+            replacement = (IMP)ZARTraceStateLongLong;
+        } else {
+            ZARLog(@"STATE-SKIP class=%@ selector=%@ types=%s",
+                   NSStringFromClass(cls), name, types);
+            continue;
+        }
+
+        class_addMethod(cls, alias, method_getImplementation(method), types);
+        method_setImplementation(method, replacement);
+        ZARLog(@"STATE-HOOKED class=%@ selector=%@ types=%s alias=%@",
+               NSStringFromClass(cls), name, types, aliasName);
+    }
+    free(methods);
+}
+
+static void ZARScanStateMethodsForClass(Class cls) {
+    if (!cls) return;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    for (unsigned int i = 0; i < count; i++) {
+        Method method = methods[i];
+        NSString *name = NSStringFromSelector(method_getName(method));
+        if (!ZARShouldTraceStateSelector(name)) continue;
+        ZARLog(@"STATE-CANDIDATE class=%@ selector=%@ types=%s",
+               NSStringFromClass(cls),
+               name,
+               method_getTypeEncoding(method) ?: "(null)");
+    }
+    free(methods);
+}
+
 static void ZARInstallInvocationTrace(void) {
     Class data = NSClassFromString(@"MSDataCoordinator");
     Class cache = NSClassFromString(@"MSLocalCache");
     Class entity = NSClassFromString(@"ChatEntity");
     Class conversation = NSClassFromString(@"ConversationModel");
+    Class singleConversation = NSClassFromString(@"SingleConversationModel");
 
     ZARInstallObjectHook(data,
                          @selector(handleRecallMessageNotification:),
@@ -304,6 +374,10 @@ static void ZARInstallInvocationTrace(void) {
                          sel_registerName("zar_orig_updateDBWhenRecalledChats:completion:"),
                          (IMP)ZARUpdateDBWhenRecalledChats,
                          "v32@0:8@16@?24");
+    ZARScanStateMethodsForClass(entity);
+    ZARInstallStateMutationTraceForClass(entity);
+    ZARScanStateMethodsForClass(singleConversation);
+    ZARInstallStateMutationTraceForClass(singleConversation);
 }
 
 void ZARRunMessageTrace(void) {
