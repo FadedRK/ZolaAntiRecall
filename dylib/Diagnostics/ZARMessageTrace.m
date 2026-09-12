@@ -181,6 +181,22 @@ static void ZARUpdateDBWhenRecalledChats(id self, SEL _cmd, id chats, id complet
            completion);
 
     ZARLogRecallArgument(@"RECALL-DB-ARG", chats);
+
+    BOOL blockSelfRecall = NO;
+    id target = nil;
+    if ([chats isKindOfClass:[NSArray class]] && [(NSArray *)chats count] > 0) {
+        target = [(NSArray *)chats firstObject];
+        id flag = ZARSafeKVC(target, @"_isRecallDelByMySelf");
+        blockSelfRecall = [flag respondsToSelector:@selector(boolValue)] && [flag boolValue];
+    }
+
+    if (blockSelfRecall) {
+        ZARLog(@"BLOCKED self recall in updateDBWhenRecalledChats:completion: message=%@",
+               ZARSafeKVC(target, @"messageId") ?: @"(nil)");
+        ZARLogCallStack(@"BLOCKED updateDBWhenRecalledChats:completion:");
+        return;
+    }
+
     if ([chats isKindOfClass:[NSArray class]]) {
         NSUInteger index = 0;
         for (id item in (NSArray *)chats) {
