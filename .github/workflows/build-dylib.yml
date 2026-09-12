@@ -1,0 +1,30 @@
+name: Build ZolaAntiRecall Dylib
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Theos
+        uses: leancodept/theos-action@v1
+        with:
+          theos-src: https://github.com/theos/theos.git
+      - name: Build
+        run: make -C dylib clean package FINALPACKAGE=1
+      - name: Verify
+        run: |
+          find dylib -name 'ZolaAntiRecall.dylib' -o -name '*.deb' -o -name '*.zip'
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZolaAntiRecall-dylib
+          path: |
+            dylib/.theos/obj/**/ZolaAntiRecall.dylib
+            dylib/packages/*
+          if-no-files-found: error
