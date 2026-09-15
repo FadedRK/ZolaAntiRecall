@@ -12,6 +12,8 @@ static NSArray<NSString *> *ZARKeywords(void) {
         @"updateDBWhenRecalledChats:completion:",
         @"set_recallTime:",
         @"setRecallTime:",
+        @"setMessage:",
+        @"setStatus:",
         @"recall:"
     ];
 }
@@ -40,6 +42,75 @@ static void ZARScanSelector(SEL sel) {
     }
     ZARLog(@"SCAN selector=%@ matches=%lu", NSStringFromSelector(sel), (unsigned long)matches);
     free(classes);
+}
+
+static BOOL ZARIsOwnerRecallEntity(id self) {
+    @try {
+        id value = [self valueForKey:@"isRecallDelByMySelf"];
+        if ([value respondsToSelector:@selector(boolValue)]) return [value boolValue];
+    } @catch (__unused NSException *e) {}
+    return NO;
+}
+
+static NSHashTable *ZARPendingEntities(void) {
+    static NSHashTable *table;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        table = [NSHashTable weakObjectsHashTable];
+    });
+    return table;
+}
+
+static BOOL ZARPendingContains(id obj) {
+    @synchronized (ZARPendingEntities()) {
+        return [ZARPendingEntities() containsObject:obj];
+    }
+}
+
+static void ZARPendingAdd(id obj) {
+    @synchronized (ZARPendingEntities()) {
+        [ZARPendingEntities() addObject:obj];
+    }
+}
+
+static void ZARPendingRemove(id obj) {
+    @synchronized (ZARPendingEntities()) {
+        [ZARPendingEntities() removeObject:obj];
+    }
+}
+
+static void ZARSetRecallTime(id self, SEL _cmd, long long value) {
+    BOOL owner = ZARIsOwnerRecallEntity(self);
+    ZARLog(@"CALL class=%@ selector=%@ value=%lld isRecallDelByMySelf=%d",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd), value, owner);
+    if (owner) {
+        ZARPendingAdd(self);
+        ZARLog(@"MARK pending owner recall entity=%p", self);
+    }
+    SEL alias = sel_registerName("zar_orig_set_recallTime:");
+    void (*orig)(id, SEL, long long) = (void (*)(id, SEL, long long))[self methodForSelector:alias];
+    if (orig) orig(self, alias, value);
+}
+
+static void ZARSetMessage(id self, SEL _cmd, id value) {
+    BOOL pending = ZARPendingContains(self);
+    NSString *incoming = [value isKindOfClass:[NSString class]] ? value : nil;
+    if (pending) {
+        id original = nil;
+        @try { original = [self valueForKey:@"originTextRecallMsg"]; } @catch (__unused NSException *e) {}
+        if ([original isKindOfClass:[NSString class]] && [original length] > 0 && incoming.length > 0) {
+            ZARLog(@"OWNER RECALL setMessage intercepted entity=%p incoming=%@ original=%@", self, incoming, original);
+            ZARPendingRemove(self);
+            SEL alias = sel_registerName("zar_orig_setMessage:");
+            void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))[self methodForSelector:alias];
+            if (orig) orig(self, alias, original);
+            return;
+        }
+    }
+    SEL alias = sel_registerName("zar_orig_setMessage:");
+    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))[self methodForSelector:alias];
+    if (orig) orig(self, alias, value);
 }
 
 static void ZARTraceObjectCall(id self, SEL _cmd, id arg, SEL alias) {
@@ -71,38 +142,43 @@ static void ZARHandleRecallWithData(id self, SEL _cmd, id arg) {
            arg ? NSStringFromClass(object_getClass(arg)) : @"(nil)",
            arg,
            isOwnerRecall);
-    if (isOwnerRecall) {
-        ZARLog(@"BLOCKED owner recall in _handleRecallWithData:");
-        return;
-    }
     SEL alias = sel_registerName("zar_orig__handleRecallWithData:");
     void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))[self methodForSelector:alias];
     if (orig) orig(self, alias, arg);
 }
 
-static void ZARSetRecallTime(id self, SEL _cmd, long long value) {
-    ZARLog(@"CALL class=%@ selector=%@ value=%lld",
-           NSStringFromClass(object_getClass(self)),
-           NSStringFromSelector(_cmd), value);
-    SEL alias = sel_registerName("zar_orig_set_recallTime:");
-    void (*orig)(id, SEL, long long) = (void (*)(id, SEL, long long))[self methodForSelector:alias];
-    if (orig) orig(self, alias, value);
-}
-
 static void ZARInstallObjectHook(Class cls, SEL sel, SEL alias, IMP replacement, const char *expectedTypes) {
-    Method method = class_getInstanceMethod(cls, sel);
-    if (!method) return;
+    if (!cls) return;
+    Method method = NULL;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    for (unsigned int i = 0; i < count; i++) {
+        if (method_getName(methods[i]) == sel) {
+            method = methods[i];
+            break;
+        }
+    }
+    if (!method) {
+        free(methods);
+        ZARLog(@"SKIP direct hook class=%@ selector=%@ reason=no-direct-method", NSStringFromClass(cls), NSStringFromSelector(sel));
+        return;
+    }
     const char *types = method_getTypeEncoding(method);
     if (!types || strcmp(types, expectedTypes) != 0) {
         ZARLog(@"SKIP hook class=%@ selector=%@ types=%s expected=%s",
                NSStringFromClass(cls), NSStringFromSelector(sel), types ?: "(null)", expectedTypes);
+        free(methods);
         return;
     }
-    if (class_getInstanceMethod(cls, alias)) return;
+    if (class_getInstanceMethod(cls, alias)) {
+        free(methods);
+        return;
+    }
     class_addMethod(cls, alias, method_getImplementation(method), types);
     method_setImplementation(method, replacement);
     ZARLog(@"HOOKED class=%@ selector=%@ types=%s alias=%@",
            NSStringFromClass(cls), NSStringFromSelector(sel), types, NSStringFromSelector(alias));
+    free(methods);
 }
 
 static void ZARInstallInvocationTrace(void) {
@@ -130,6 +206,11 @@ static void ZARInstallInvocationTrace(void) {
                          sel_registerName("zar_orig_set_recallTime:"),
                          (IMP)ZARSetRecallTime,
                          "v24@0:8q16");
+    ZARInstallObjectHook(entity,
+                         @selector(setMessage:),
+                         sel_registerName("zar_orig_setMessage:"),
+                         (IMP)ZARSetMessage,
+                         "v24@0:8@16");
 }
 
 void ZARRunMessageTrace(void) {
@@ -139,7 +220,7 @@ void ZARRunMessageTrace(void) {
         ZARScanSelector(NSSelectorFromString(name));
     }
     ZARInstallInvocationTrace();
-    ZARLog(@"INVOCATION TRACE installed; originals are still called; no recall blocking");
+    ZARLog(@"TARGETED owner-recall mutation hook installed");
 }
 
 NSString *ZARDiagnosticText(void) {
