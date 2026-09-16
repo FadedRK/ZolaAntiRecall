@@ -101,6 +101,22 @@ static void ZARInstallDirectHook(Class cls, SEL sel, SEL alias, IMP replacement,
     free(methods);
 }
 
+static void ZARLogReturnAddressProbe(NSString *prefix) {
+    void *a0 = __builtin_return_address(0);
+    Dl_info i0 = {0};
+    if (dladdr(a0, &i0) && i0.dli_fbase) {
+        uintptr_t base = (uintptr_t)i0.dli_fbase;
+        uintptr_t addr = (uintptr_t)a0;
+        ZARLog(@"%@ CURRENT addr=%p image=%s base=0x%lx offset=0x%lx symbol=%s",
+               prefix, a0, i0.dli_fname ?: "(null)",
+               (unsigned long)base,
+               (unsigned long)(addr >= base ? addr - base : 0),
+               i0.dli_sname ?: "(null)");
+    } else {
+        ZARLog(@"%@ CURRENT unresolved addr=%p", prefix, a0);
+    }
+}
+
 static void ZARRecallTimeBacktrace(id self, SEL _cmd, long long recallTime) {
     ZARLog(@"RECALLTIME class=%@ selector=%@ recallTime=%lld self=%p",
            NSStringFromClass(object_getClass(self)),
@@ -121,6 +137,26 @@ static void ZARRecallTimeBacktrace(id self, SEL _cmd, long long recallTime) {
 }
 
 
+static void ZARLogAddressInfo(NSString *prefix, NSUInteger frameIndex) {
+    void *address = __builtin_return_address(0);
+    Dl_info info = {0};
+    if (dladdr(address, &info) && info.dli_fname) {
+        uintptr_t base = (uintptr_t)info.dli_fbase;
+        uintptr_t addr = (uintptr_t)address;
+        uintptr_t offset = addr >= base ? (addr - base) : 0;
+        ZARLog(@"%@ DLADDR frame=%lu addr=%p image=%s base=0x%lx offset=0x%lx symbol=%s",
+               prefix,
+               (unsigned long)frameIndex,
+               address,
+               info.dli_fname,
+               (unsigned long)base,
+               (unsigned long)offset,
+               info.dli_sname ?: "(null)");
+    } else {
+        ZARLog(@"%@ DLADDR frame=%lu unresolved addr=%p", prefix, (unsigned long)frameIndex, address);
+    }
+}
+
 static void ZARLogStackWithPrefix(NSString *prefix) {
     NSArray<NSString *> *stack = [NSThread callStackSymbols];
     NSUInteger limit = MIN((NSUInteger)16, stack.count);
@@ -128,6 +164,8 @@ static void ZARLogStackWithPrefix(NSString *prefix) {
     for (NSUInteger i = 0; i < limit; i++) {
         ZARLog(@"%@ #%lu %@", prefix, (unsigned long)i, stack[i]);
     }
+    // dladdr on the current frame gives us a symbol/image sanity check.
+    ZARLogAddressInfo(prefix, 0);
 }
 
 static void ZARPBDataReaderRecallTrace(id self, SEL _cmd, const void *buffer) {
