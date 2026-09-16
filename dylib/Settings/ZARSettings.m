@@ -4,7 +4,36 @@
 #import <objc/runtime.h>
 
 static NSString * const ZAREnabledKey = @"ZolaAntiRecallEnabled";
+static NSString * const ZARShowMyRecallKey = @"ZolaAntiRecallShowMyRecall";
 static NSInteger const ZARSettingsEntryTag = 0x5A415253;
+
+@implementation ZARSettings
+
++ (instancetype)sharedInstance {
+    static ZARSettings *instance;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [ZARSettings new];
+    });
+    return instance;
+}
+
+- (BOOL)showMyRecallEnabled {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([defaults objectForKey:ZARShowMyRecallKey] == nil) {
+        return YES;
+    }
+    return [defaults boolForKey:ZARShowMyRecallKey];
+}
+
+- (void)setShowMyRecallEnabled:(BOOL)enabled {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:enabled forKey:ZARShowMyRecallKey];
+    [defaults synchronize];
+    ZARLog(@"Show my recall enabled=%@", enabled ? @"YES" : @"NO");
+}
+
+@end
 
 @interface ZARSettingsViewController : UITableViewController
 @end
@@ -19,6 +48,7 @@ static NSInteger const ZARSettingsEntryTag = 0x5A415253;
 
 @implementation ZARSettingsViewController {
     UISwitch *_pluginSwitch;
+    UISwitch *_myRecallSwitch;
 }
 
 - (instancetype)init {
@@ -35,7 +65,7 @@ static NSInteger const ZARSettingsEntryTag = 0x5A415253;
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return section == 0 ? 1 : 2;
+    return section == 0 ? 2 : 2;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -43,7 +73,7 @@ static NSInteger const ZARSettingsEntryTag = 0x5A415253;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    return section == 0 ? @"插件总开关关闭后，本插件不执行任何后续功能。" : @"运行时扫描仅用于定位 Zalo 的 Recall 相关 Class / Method，不修改目标方法。";
+    return section == 0 ? @"插件总开关关闭后，本插件不执行后续功能。自己撤回消息开关仅控制“你已撤回”是否保留。" : @"运行时扫描用于定位 Zalo 的 Recall 相关 Class / Method。";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -54,13 +84,20 @@ static NSInteger const ZARSettingsEntryTag = 0x5A415253;
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.detailTextLabel.text = nil;
 
-    if (indexPath.section == 0) {
+    if (indexPath.section == 0 && indexPath.row == 0) {
         cell.textLabel.text = @"插件总开关";
         UISwitch *sw = [UISwitch new];
         sw.on = [[NSUserDefaults standardUserDefaults] objectForKey:ZAREnabledKey] ? [[NSUserDefaults standardUserDefaults] boolForKey:ZAREnabledKey] : YES;
         [sw addTarget:self action:@selector(pluginSwitchChanged:) forControlEvents:UIControlEventValueChanged];
         cell.accessoryView = sw;
         _pluginSwitch = sw;
+    } else if (indexPath.section == 0 && indexPath.row == 1) {
+        cell.textLabel.text = @"显示自己撤回的消息";
+        UISwitch *sw = [UISwitch new];
+        sw.on = [ZARSettings sharedInstance].showMyRecallEnabled;
+        [sw addTarget:self action:@selector(myRecallSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = sw;
+        _myRecallSwitch = sw;
     } else if (indexPath.row == 0) {
         cell.textLabel.text = @"Recall 运行时扫描器";
         cell.detailTextLabel.text = @"扫描 Class / Method";
@@ -77,6 +114,10 @@ static NSInteger const ZARSettingsEntryTag = 0x5A415253;
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:ZAREnabledKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
     ZARLog(@"Plugin enabled=%@", sender.isOn ? @"YES" : @"NO");
+}
+
+- (void)myRecallSwitchChanged:(UISwitch *)sender {
+    [ZARSettings sharedInstance].showMyRecallEnabled = sender.isOn;
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
