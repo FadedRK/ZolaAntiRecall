@@ -103,6 +103,65 @@ static void ZARInstallDirectHook(Class cls, SEL sel, SEL alias, IMP replacement,
     free(methods);
 }
 
+static void ZARLogStackWithPrefix(NSString *prefix) {
+    void *frames[32];
+    int count = backtrace(frames, 32);
+    int limit = MIN(count, 16);
+    ZARLog(@"%@ frames=%d", prefix, limit);
+    for (int i = 0; i < limit; i++) {
+        Dl_info info = {0};
+        uintptr_t addr = (uintptr_t)frames[i];
+        if (dladdr(frames[i], &info) && info.dli_fname && info.dli_fbase) {
+            uintptr_t base = (uintptr_t)info.dli_fbase;
+            ZARLog(@"%@ #%d addr=%p image=%s base=0x%lx offset=0x%lx symbol=%s",
+                   prefix, i, frames[i], info.dli_fname,
+                   (unsigned long)base,
+                   (unsigned long)(addr >= base ? addr - base : 0),
+                   info.dli_sname ?: "(null)");
+        } else {
+            ZARLog(@"%@ #%d addr=%p unresolved", prefix, i, frames[i]);
+        }
+    }
+}
+
+static void ZARPBDataReaderRecallTrace(id self, SEL _cmd, const void *buffer) {
+    ZARLog(@"[ZALO_PB_RECALL] class=%@ selector=%@ buffer=%p",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           buffer);
+    ZARLogStackWithPrefix(@"[ZALO_PB_RECALL_STACK]");
+    SEL alias = sel_registerName("zar_orig_pbdatareader_recall:");
+    void (*orig)(id, SEL, const void *) =
+        (void (*)(id, SEL, const void *))[self methodForSelector:alias];
+    if (orig) orig(self, alias, buffer);
+}
+
+static void ZARNotificationPostTrace(id self, SEL _cmd, NSString *name, id object, NSDictionary *userInfo) {
+    NSString *lower = name.lowercaseString ?: @"";
+    BOOL recallLike = [lower containsString:@"recall"] || (userInfo[@"messageId"] != nil && userInfo[@"isOwnerRecall"] != nil);
+    if (recallLike) {
+        ZARLog(@"[ZALO_NOTIFICATION] name=%@ objectClass=%@ object=%p userInfo=%@", name, object ? NSStringFromClass(object_getClass(object)) : @"(nil)", object, userInfo ?: @{});
+        ZARLogStackWithPrefix(@"[ZALO_NOTIFICATION_STACK]");
+    }
+    SEL alias = sel_registerName("zar_orig_postNotificationName:object:userInfo:");
+    void (*orig)(id, SEL, NSString *, id, NSDictionary *) =
+        (void (*)(id, SEL, NSString *, id, NSDictionary *))[self methodForSelector:alias];
+    if (orig) orig(self, alias, name, object, userInfo);
+}
+
+static void ZARInstallRecallProbeHooks(void) {
+    ZARInstallDirectHook(NSClassFromString(@"PBDataReader"),
+                         @selector(recall:),
+                         sel_registerName("zar_orig_pbdatareader_recall:"),
+                         (IMP)ZARPBDataReaderRecallTrace,
+                         "v24@0:8r^{?=QQ}16");
+    ZARInstallDirectHook([NSNotificationCenter class],
+                         @selector(postNotificationName:object:userInfo:),
+                         sel_registerName("zar_orig_postNotificationName:object:userInfo:"),
+                         (IMP)ZARNotificationPostTrace,
+                         "v40@0:8@16@24@32");
+}
+
 static void ZARRecallTimeBacktrace(id self, SEL _cmd, long long recallTime) {
     ZARLog(@"RECALLTIME class=%@ selector=%@ recallTime=%lld self=%p",
            NSStringFromClass(object_getClass(self)),
