@@ -40,6 +40,118 @@ static NSString *ZARSafeDescription(id obj)
     } @catch (__unused NSException *exception) { return @"<description exception>"; }
 }
 
+static id ZARSafeObjectIvarValue(id object, Ivar ivar)
+{
+    if (!object || !ivar) return nil;
+    @try { return object_getIvar(object, ivar); }
+    @catch (__unused NSException *exception) { return nil; }
+}
+
+static void ZARDumpClassProperties(Class cls, id object)
+{
+    if (!cls || cls == [NSObject class]) return;
+
+    @autoreleasepool {
+        unsigned int propertyCount = 0;
+        objc_property_t *properties = class_copyPropertyList(cls, &propertyCount);
+        ZARLog(@"[ZAR-FULLDUMP] CLASS %@ properties=%u", NSStringFromClass(cls), propertyCount);
+
+        for (unsigned int i = 0; i < propertyCount; i++) {
+            @autoreleasepool {
+                objc_property_t property = properties[i];
+                const char *name = property ? property_getName(property) : NULL;
+                const char *attrs = property ? property_getAttributes(property) : NULL;
+                if (!name) continue;
+
+                NSString *key = [NSString stringWithUTF8String:name] ?: @"<invalid-name>";
+                id value = ZARSafeGetValue(object, key);
+                NSString *valueDescription = value ? ZARSafeDescription(value) : @"<nil/unavailable>";
+                ZARLog(@"[ZAR-FULLDUMP] PROPERTY %@ = %@ | attrs=%@ | type=%@",
+                       key,
+                       valueDescription,
+                       attrs ? [NSString stringWithUTF8String:attrs] : @"<none>",
+                       value ? NSStringFromClass(object_getClass(value)) : @"<nil>");
+            }
+        }
+        if (properties) free(properties);
+    }
+
+    ZARDumpClassProperties(class_getSuperclass(cls), object);
+}
+
+static BOOL ZARIvarIsObject(const char *typeEncoding)
+{
+    if (!typeEncoding || !typeEncoding[0]) return NO;
+    const char *type = typeEncoding;
+    while (*type == 'r' || *type == 'n' || *type == 'N' || *type == 'o' || *type == 'O' || *type == 'R' || *type == 'V') type++;
+    return type[0] == '@';
+}
+
+static void ZARDumpClassIvars(Class cls, id object)
+{
+    if (!cls || cls == [NSObject class]) return;
+
+    @autoreleasepool {
+        unsigned int ivarCount = 0;
+        Ivar *ivars = class_copyIvarList(cls, &ivarCount);
+        ZARLog(@"[ZAR-FULLDUMP] CLASS %@ ivars=%u", NSStringFromClass(cls), ivarCount);
+
+        for (unsigned int i = 0; i < ivarCount; i++) {
+            @autoreleasepool {
+                Ivar ivar = ivars[i];
+                const char *name = ivar ? ivar_getName(ivar) : NULL;
+                const char *type = ivar ? ivar_getTypeEncoding(ivar) : NULL;
+                if (!name) continue;
+
+                NSString *ivarName = [NSString stringWithUTF8String:name] ?: @"<invalid-name>";
+                NSString *typeString = type ? [NSString stringWithUTF8String:type] : @"<unknown>";
+
+                if (ZARIvarIsObject(type)) {
+                    id value = ZARSafeObjectIvarValue(object, ivar);
+                    ZARLog(@"[ZAR-FULLDUMP] IVAR %@ = %@ | type=%@ | valueClass=%@",
+                           ivarName,
+                           value ? ZARSafeDescription(value) : @"<nil>",
+                           typeString,
+                           value ? NSStringFromClass(object_getClass(value)) : @"<nil>");
+                } else {
+                    // 不把标量/结构体内存强转成对象，避免 object_getIvar 产生非法指针。
+                    // KVC 仅作为安全的可读值尝试；失败则只输出真实 type encoding。
+                    id value = ZARSafeGetValue(object, ivarName);
+                    NSString *valueDescription = value ? ZARSafeDescription(value) : @"<unavailable>";
+                    ZARLog(@"[ZAR-FULLDUMP] IVAR %@ = %@ | type=%@ | non-object",
+                           ivarName, valueDescription, typeString);
+                }
+            }
+        }
+        if (ivars) free(ivars);
+    }
+
+    ZARDumpClassIvars(class_getSuperclass(cls), object);
+}
+
+static void ZARDumpChatEntityRuntimeFields(id object)
+{
+    if (!object) return;
+
+    Class cls = object_getClass(object);
+    if (!cls) return;
+
+    ZARLog(@"[ZAR-FULLDUMP] ==================================================");
+    ZARLog(@"[ZAR-FULLDUMP] BEGIN ChatEntity runtime field dump");
+    ZARLog(@"[ZAR-FULLDUMP] object=%p class=%@ superclass=%@",
+           object,
+           NSStringFromClass(cls),
+           class_getSuperclass(cls) ? NSStringFromClass(class_getSuperclass(cls)) : @"<none>");
+    ZARLog(@"[ZAR-FULLDUMP] messageId=%@", ZARSafeDescription(ZARSafeGetValue(object, @"messageId")));
+
+    // Properties and ivars are enumerated independently because many model fields are ivar-only.
+    ZARDumpClassProperties(cls, object);
+    ZARDumpClassIvars(cls, object);
+
+    ZARLog(@"[ZAR-FULLDUMP] END ChatEntity runtime field dump");
+    ZARLog(@"[ZAR-FULLDUMP] ==================================================");
+}
+
 static id ZARSafeMessageId(id obj) { return ZARSafeGetValue(obj, @"messageId"); }
 
 static NSString *ZARCacheKeyForMessageId(id messageId)
@@ -199,6 +311,9 @@ static void ZARHandleRecallWithoutOriginal(id self, SEL _cmd, id chatEntity)
         if (ZAROriginalUpdateUndoMessageContent) ZAROriginalUpdateUndoMessageContent(self, _cmd, chatEntity);
         return;
     }
+
+    // Full runtime dump is diagnostic-only. It executes before any mutation and never changes control flow.
+    ZARDumpChatEntityRuntimeFields(chatEntity);
 
     BOOL isMyRecall = ZARIsRecallDelByMySelf(chatEntity);
 
