@@ -1,220 +1,137 @@
 #import "ZARMessageTrace.h"
 #import "../Core/ZARLogger.h"
 #import <objc/runtime.h>
-#import <dlfcn.h>
-#import <execinfo.h>
+#import <Foundation/Foundation.h>
 
-static NSArray<NSString *> *ZARKeywords(void) {
-    return @[
-        @"handleRecallMessageNotification:",
-        @"_handleRecallWithData:",
-        @"onActionRecallMessages:",
-        @"processAfterRecallMessageSuccess:",
-        @"proccessUndoInMediaStoreWithMessageId:isGroup:isOwnerRecall:",
-        @"updateDBWhenRecalledChats:completion:",
-        @"set_recallTime:",
-        @"setRecallTime:",
-        @"setMessage:",
-        @"setStatus:",
-        @"recall:"
-    ];
-}
-
-static void ZARScanSelector(SEL sel) {
-    int count = objc_getClassList(NULL, 0);
-    if (count <= 0) return;
-    Class *classes = (__unsafe_unretained Class *)malloc(sizeof(Class) * (size_t)count);
-    if (!classes) return;
-    count = objc_getClassList(classes, count);
-    NSUInteger matches = 0;
-    for (int i = 0; i < count; i++) {
-        Class cls = classes[i];
-        unsigned int methodCount = 0;
-        Method *methods = class_copyMethodList(cls, &methodCount);
-        for (unsigned int j = 0; j < methodCount; j++) {
-            Method m = methods[j];
-            if (method_getName(m) != sel) continue;
-            matches++;
-            const char *types = method_getTypeEncoding(m);
-            ZARLog(@"FOUND class=%@ selector=%@ directImplementation=YES types=%s imp=%p",
-                   NSStringFromClass(cls), NSStringFromSelector(sel), types ?: "(null)", method_getImplementation(m));
-            break;
-        }
-        free(methods);
-    }
-    ZARLog(@"SCAN selector=%@ matches=%lu", NSStringFromSelector(sel), (unsigned long)matches);
-    free(classes);
-}
-
-static void ZARTraceObjectCall(id self, SEL _cmd, id arg, SEL alias) {
-    ZARLog(@"CALL class=%@ selector=%@ argClass=%@ arg=%p",
-           NSStringFromClass(object_getClass(self)),
-           NSStringFromSelector(_cmd),
-           arg ? NSStringFromClass(object_getClass(arg)) : @"(nil)",
-           arg);
-    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))[self methodForSelector:alias];
-    if (orig) orig(self, alias, arg);
-}
-
-static void ZARHandleRecall(id self, SEL _cmd, id arg) {
-    ZARTraceObjectCall(self, _cmd, arg, sel_registerName("zar_orig_handleRecallMessageNotification:"));
-}
-
-static BOOL ZARIsOwnerRecallData(id arg) {
-    if (![arg isKindOfClass:[NSDictionary class]]) return NO;
-    id value = [(NSDictionary *)arg objectForKey:@"isOwnerRecall"];
-    if (![value respondsToSelector:@selector(boolValue)]) return NO;
-    return [value boolValue];
-}
-
-static void ZARHandleRecallWithData(id self, SEL _cmd, id arg) {
-    BOOL isOwnerRecall = ZARIsOwnerRecallData(arg);
-    ZARLog(@"CALL class=%@ selector=%@ argClass=%@ arg=%p isOwnerRecall=%d",
-           NSStringFromClass(object_getClass(self)),
-           NSStringFromSelector(_cmd),
-           arg ? NSStringFromClass(object_getClass(arg)) : @"(nil)",
-           arg,
-           isOwnerRecall);
-    SEL alias = sel_registerName("zar_orig__handleRecallWithData:");
-    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))[self methodForSelector:alias];
-    if (orig) orig(self, alias, arg);
-}
-
-static void ZARInstallDirectHook(Class cls, SEL sel, SEL alias, IMP replacement, const char *expectedTypes) {
+static void ZARScanSelectorOnClass(Class cls, SEL sel) {
     if (!cls) return;
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
-    Method method = NULL;
-    for (unsigned int i = 0; i < count; i++) {
-        if (method_getName(methods[i]) == sel) { method = methods[i]; break; }
-    }
-    if (!method) { free(methods); return; }
-    const char *types = method_getTypeEncoding(method);
-    if (!types || strcmp(types, expectedTypes) != 0) {
-        ZARLog(@"SKIP hook class=%@ selector=%@ types=%s expected=%s",
-               NSStringFromClass(cls), NSStringFromSelector(sel), types ?: "(null)", expectedTypes);
-        free(methods);
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method) {
+        ZARLog(@"SCAN target class=%@ selector=%@ NOT FOUND", NSStringFromClass(cls), NSStringFromSelector(sel));
         return;
     }
-    if (class_getInstanceMethod(cls, alias)) { free(methods); return; }
-    class_addMethod(cls, alias, method_getImplementation(method), types);
-    method_setImplementation(method, replacement);
-    ZARLog(@"HOOKED class=%@ selector=%@ types=%s", NSStringFromClass(cls), NSStringFromSelector(sel), types);
-    free(methods);
+    ZARLog(@"FOUND target class=%@ selector=%@ types=%s imp=%p",
+           NSStringFromClass(cls),
+           NSStringFromSelector(sel),
+           method_getTypeEncoding(method) ?: "(null)",
+           method_getImplementation(method));
 }
 
-static void ZARLogStackWithPrefix(NSString *prefix) {
-    void *frames[32];
-    int count = backtrace(frames, 32);
-    int limit = MIN(count, 16);
-    ZARLog(@"%@ frames=%d", prefix, limit);
-    for (int i = 0; i < limit; i++) {
-        Dl_info info = {0};
-        uintptr_t addr = (uintptr_t)frames[i];
-        if (dladdr(frames[i], &info) && info.dli_fname && info.dli_fbase) {
-            uintptr_t base = (uintptr_t)info.dli_fbase;
-            ZARLog(@"%@ #%d addr=%p image=%s base=0x%lx offset=0x%lx symbol=%s",
-                   prefix, i, frames[i], info.dli_fname,
-                   (unsigned long)base,
-                   (unsigned long)(addr >= base ? addr - base : 0),
-                   info.dli_sname ?: "(null)");
-        } else {
-            ZARLog(@"%@ #%d addr=%p unresolved", prefix, i, frames[i]);
+static id ZARSafeValueForKey(id obj, NSString *key) {
+    if (!obj || ![obj respondsToSelector:NSSelectorFromString(key)]) return nil;
+    @try {
+        return [obj valueForKey:key];
+    } @catch (__unused NSException *e) {
+        ZARLog(@"[ZAR-PROBE] KVC exception key=%@", key);
+        return nil;
+    }
+}
+
+static NSString *ZARBoundedDescription(id obj) {
+    if (!obj) return @"(nil)";
+    NSString *desc = nil;
+    @try {
+        desc = [obj description];
+    } @catch (__unused NSException *e) {
+        desc = @"<description threw exception>";
+    }
+    if (![desc isKindOfClass:[NSString class]]) return @"<non-string description>";
+    if (desc.length > 500) desc = [desc substringToIndex:500];
+    return desc;
+}
+
+static void ZARProbeUndoMessageContent(id self, SEL _cmd, id arg) {
+    ZARLog(@"[ZAR-PROBE] === updateUndoMessageContent TRIGGERED ===");
+    ZARLog(@"[ZAR-PROBE] Self Class: %@", NSStringFromClass(object_getClass(self)));
+    ZARLog(@"[ZAR-PROBE] Arg: %p", arg);
+
+    if (arg) {
+        ZARLog(@"[ZAR-PROBE] Class: %@", NSStringFromClass(object_getClass(arg)));
+        ZARLog(@"[ZAR-PROBE] Superclass: %@", NSStringFromClass(class_getSuperclass(object_getClass(arg))));
+        ZARLog(@"[ZAR-PROBE] Desc: %@", ZARBoundedDescription(arg));
+
+        id value = ZARSafeValueForKey(arg, @"messageId");
+        if (value) ZARLog(@"[ZAR-PROBE] messageId: %@", value);
+
+        value = ZARSafeValueForKey(arg, @"message");
+        if (value) ZARLog(@"[ZAR-PROBE] message: %@", value);
+
+        value = ZARSafeValueForKey(arg, @"status");
+        if (value) ZARLog(@"[ZAR-PROBE] status: %@", value);
+
+        value = ZARSafeValueForKey(arg, @"isRecallDelByMySelf");
+        if (value) ZARLog(@"[ZAR-PROBE] isRecallDelByMySelf: %@", value);
+
+        if ([arg isKindOfClass:[NSNotification class]]) {
+            NSNotification *notif = (NSNotification *)arg;
+            ZARLog(@"[ZAR-PROBE] Notif Name: %@", notif.name);
+            ZARLog(@"[ZAR-PROBE] Notif UserInfo: %@", notif.userInfo ?: @{});
         }
+    } else {
+        ZARLog(@"[ZAR-PROBE] Triggered but arg is nil!");
+    }
+
+    ZARLog(@"[ZAR-PROBE] ========================================");
+
+    SEL alias = sel_registerName("zar_orig_updateUndoMessageContent:");
+    void (*orig)(id, SEL, id) =
+        (void (*)(id, SEL, id))[self methodForSelector:alias];
+    if (orig) {
+        orig(self, alias, arg);
+    } else {
+        ZARLog(@"[ZAR-PROBE] ERROR: original implementation alias not found");
     }
 }
 
-static void ZARPBDataReaderRecallTrace(id self, SEL _cmd, const void *buffer) {
-    ZARLog(@"[ZALO_PB_RECALL] class=%@ selector=%@ buffer=%p",
-           NSStringFromClass(object_getClass(self)),
-           NSStringFromSelector(_cmd),
-           buffer);
-    ZARLogStackWithPrefix(@"[ZALO_PB_RECALL_STACK]");
-    SEL alias = sel_registerName("zar_orig_pbdatareader_recall:");
-    void (*orig)(id, SEL, const void *) =
-        (void (*)(id, SEL, const void *))[self methodForSelector:alias];
-    if (orig) orig(self, alias, buffer);
-}
-
-static void ZARNotificationPostTrace(id self, SEL _cmd, NSString *name, id object, NSDictionary *userInfo) {
-    NSString *lower = name.lowercaseString ?: @"";
-    BOOL recallLike = [lower containsString:@"recall"] || (userInfo[@"messageId"] != nil && userInfo[@"isOwnerRecall"] != nil);
-    if (recallLike) {
-        ZARLog(@"[ZALO_NOTIFICATION] name=%@ objectClass=%@ object=%p userInfo=%@", name, object ? NSStringFromClass(object_getClass(object)) : @"(nil)", object, userInfo ?: @{});
-        ZARLogStackWithPrefix(@"[ZALO_NOTIFICATION_STACK]");
-    }
-    SEL alias = sel_registerName("zar_orig_postNotificationName:object:userInfo:");
-    void (*orig)(id, SEL, NSString *, id, NSDictionary *) =
-        (void (*)(id, SEL, NSString *, id, NSDictionary *))[self methodForSelector:alias];
-    if (orig) orig(self, alias, name, object, userInfo);
-}
-
-static void ZARInstallRecallProbeHooks(void) {
-    ZARInstallDirectHook(NSClassFromString(@"PBDataReader"),
-                         @selector(recall:),
-                         sel_registerName("zar_orig_pbdatareader_recall:"),
-                         (IMP)ZARPBDataReaderRecallTrace,
-                         "v24@0:8r^{?=QQ}16");
-    ZARInstallDirectHook([NSNotificationCenter class],
-                         @selector(postNotificationName:object:userInfo:),
-                         sel_registerName("zar_orig_postNotificationName:object:userInfo:"),
-                         (IMP)ZARNotificationPostTrace,
-                         "v40@0:8@16@24@32");
-}
-
-static void ZARRecallTimeBacktrace(id self, SEL _cmd, long long recallTime) {
-    ZARLog(@"RECALLTIME class=%@ selector=%@ recallTime=%lld self=%p",
-           NSStringFromClass(object_getClass(self)),
-           NSStringFromSelector(_cmd),
-           recallTime,
-           self);
-
-    ZARLogStackWithPrefix(@"[ZAR-DLADDR-RECALLTIME]");
-
-    SEL alias = sel_registerName("zar_orig_set_recallTime:");
-    void (*orig)(id, SEL, long long) =
-        (void (*)(id, SEL, long long))[self methodForSelector:alias];
-    if (orig) orig(self, alias, recallTime);
-}
-
-static void ZARInstallRecallTimeBacktraceHook(void) {
-    Class chatEntity = NSClassFromString(@"ChatEntity");
-    if (!chatEntity) {
-        ZARLog(@"BACKTRACE hook skipped: ChatEntity not found");
+static void ZARInstallProbeHook(void) {
+    Class cls = NSClassFromString(@"UndoChatProcessor");
+    if (!cls) {
+        ZARLog(@"[ZAR-PROBE] UndoChatProcessor not found");
         return;
     }
-    ZARInstallDirectHook(chatEntity,
-                         @selector(set_recallTime:),
-                         sel_registerName("zar_orig_set_recallTime:"),
-                         (IMP)ZARRecallTimeBacktrace,
-                         "v24@0:8q16");
-}
 
-static void ZARInstallInvocationTrace(void) {
-    Class data = NSClassFromString(@"MSDataCoordinator");
-    Class cache = NSClassFromString(@"MSLocalCache");
-    ZARInstallDirectHook(data, @selector(handleRecallMessageNotification:), sel_registerName("zar_orig_handleRecallMessageNotification:"), (IMP)ZARHandleRecall, "v24@0:8@16");
-    ZARInstallDirectHook(cache, @selector(handleRecallMessageNotification:), sel_registerName("zar_orig_handleRecallMessageNotification:"), (IMP)ZARHandleRecall, "v24@0:8@16");
-    ZARInstallDirectHook(data, NSSelectorFromString(@"_handleRecallWithData:"), sel_registerName("zar_orig__handleRecallWithData:"), (IMP)ZARHandleRecallWithData, "v24@0:8@16");
-    ZARInstallRecallTimeBacktraceHook();
-    ZARInstallRecallProbeHooks();
+    SEL sel = NSSelectorFromString(@"updateUndoMessageContent:");
+    SEL alias = sel_registerName("zar_orig_updateUndoMessageContent:");
+
+    ZARScanSelectorOnClass(cls, sel);
+
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method) return;
+
+    const char *types = method_getTypeEncoding(method);
+    if (!types || strcmp(types, "v24@0:8@16") != 0) {
+        ZARLog(@"[ZAR-PROBE] SKIP type mismatch selector=%@ types=%s expected=v24@0:8@16",
+               NSStringFromSelector(sel), types ?: "(null)");
+        return;
+    }
+
+    if (class_getInstanceMethod(cls, alias)) {
+        ZARLog(@"[ZAR-PROBE] hook already installed");
+        return;
+    }
+
+    class_addMethod(cls, alias, method_getImplementation(method), types);
+    method_setImplementation(method, (IMP)ZARProbeUndoMessageContent);
+    ZARLog(@"[ZAR-PROBE] HOOKED class=%@ selector=%@ types=%s alias=%@",
+           NSStringFromClass(cls), NSStringFromSelector(sel), types, NSStringFromSelector(alias));
 }
 
 void ZARRunMessageTrace(void) {
-    ZARLog(@"===== ZolaAntiRecall runtime discovery =====");
-    ZARLog(@"Process=%@ PID=%d", NSProcessInfo.processInfo.processName, NSProcessInfo.processInfo.processIdentifier);
-    for (NSString *name in ZARKeywords()) ZARScanSelector(NSSelectorFromString(name));
-    ZARInstallInvocationTrace();
-    ZARLog(@"READ-ONLY TRACE: set_recallTime + PBDataReader recall: + NSNotificationCenter postNotificationName:object:userInfo:; all originals are called");
+    ZARLog(@"===== ZolaAntiRecall parameter probe =====");
+    ZARLog(@"Process=%@ PID=%d", NSProcessInfo.processInfo.processName, NSProcessInfo.processIdentifier);
+    ZARInstallProbeHook();
+    ZARLog(@"[ZAR-PROBE] READ-ONLY ONLY: updateUndoMessageContent:; original is always called");
 }
 
 NSString *ZARDiagnosticText(void) {
     NSString *text = [NSString stringWithContentsOfFile:ZARLogPath() encoding:NSUTF8StringEncoding error:nil];
-    if (!text.length) return @"暂无扫描日志。请点击“重新扫描”。";
+    if (!text.length) return @"暂无探测日志。请点击“重新扫描”。";
     if (text.length > 30000) text = [text substringFromIndex:text.length - 30000];
     return text;
 }
 
 void ZARInstallMessageTrace(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{ ZARRunMessageTrace(); });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ZARRunMessageTrace();
+    });
 }
