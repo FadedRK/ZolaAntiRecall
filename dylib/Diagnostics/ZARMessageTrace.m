@@ -6,153 +6,142 @@
 static void (*ZAROriginalUpdateUndoMessageContent)(id, SEL, id) = NULL;
 static BOOL ZARUndoProbeInstalled = NO;
 
-static NSString *ZARSafeDescription(id obj) {
-    if (!obj) return @"(nil)";
-
+static id ZARSafeGetValue(id target, NSString *key)
+{
+    if (!target || !key) return @"<nil>";
     @try {
-        NSString *desc = [obj description];
-        if (![desc isKindOfClass:[NSString class]]) {
-            return @"<non-string description>";
-        }
-        return desc.length > 1000 ? [desc substringToIndex:1000] : desc;
+        id value = [target valueForKey:key];
+        return value ? value : @"<null>";
     } @catch (__unused NSException *exception) {
-        return @"<description exception>";
+        return @"<Not Found>";
     }
 }
 
-static id ZARSafeMessageId(id obj) {
-    if (!obj) return nil;
-
-    @try {
-        SEL selector = NSSelectorFromString(@"messageId");
-        if (![obj respondsToSelector:selector]) return nil;
-        return [obj valueForKey:@"messageId"];
-    } @catch (__unused NSException *exception) {
-        return nil;
-    }
+static void ZARPrintChatEntityState(NSString *phase, id chatEntity)
+{
+    ZARLog(@"[ZAR-DIFF] ========== %@ ==========", phase);
+    ZARLog(@"[ZAR-DIFF] messageId            = %@", ZARSafeGetValue(chatEntity, @"messageId"));
+    ZARLog(@"[ZAR-DIFF] message              = %@", ZARSafeGetValue(chatEntity, @"message"));
+    ZARLog(@"[ZAR-DIFF] originTextRecallMsg  = %@", ZARSafeGetValue(chatEntity, @"originTextRecallMsg"));
+    ZARLog(@"[ZAR-DIFF] recallTime           = %@", ZARSafeGetValue(chatEntity, @"recallTime"));
+    ZARLog(@"[ZAR-DIFF] status               = %@", ZARSafeGetValue(chatEntity, @"status"));
+    ZARLog(@"[ZAR-DIFF] _isRecallDelByMySelf = %@", ZARSafeGetValue(chatEntity, @"_isRecallDelByMySelf"));
+    ZARLog(@"[ZAR-DIFF] rtfMessage           = %@", ZARSafeGetValue(chatEntity, @"rtfMessage"));
 }
 
-static void ZARHookUpdateUndoMessageContent(id self, SEL _cmd, id arg)
+static void ZARHookUpdateUndoMessageContent(id self, SEL _cmd, id chatEntity)
 {
     @autoreleasepool {
-        ZARLog(@"[ZAR-PROBE] ===== updateUndoMessageContent: TRIGGERED =====");
+        ZARLog(@"[ZAR-DIFF] ===== updateUndoMessageContent: ENTER =====");
+        ZARLog(@"[ZAR-DIFF] self class = %@", self ? NSStringFromClass(object_getClass(self)) : @"<nil>");
 
-        if (arg) {
-            Class argClass = object_getClass(arg);
-            ZARLog(@"[ZAR-PROBE] arg class = %@",
-                   argClass ? NSStringFromClass(argClass) : @"(nil)");
-            ZARLog(@"[ZAR-PROBE] arg description = %@",
-                   ZARSafeDescription(arg));
+        if (!chatEntity) {
+            ZARLog(@"[ZAR-DIFF] chatEntity = nil");
+            if (ZAROriginalUpdateUndoMessageContent) {
+                ZAROriginalUpdateUndoMessageContent(self, _cmd, chatEntity);
+            }
+            ZARLog(@"[ZAR-DIFF] ===== EXIT =====");
+            return;
+        }
 
-            id messageId = ZARSafeMessageId(arg);
-            if (messageId) {
-                ZARLog(@"[ZAR-PROBE] arg.messageId = %@", messageId);
-            } else {
-                ZARLog(@"[ZAR-PROBE] arg.messageId = <unavailable>");
+        ZARLog(@"[ZAR-DIFF] chatEntity class = %@", NSStringFromClass(object_getClass(chatEntity)));
+
+        ZARPrintChatEntityState(@"BEFORE", chatEntity);
+
+        ZARLog(@"[ZAR-DIFF] ========== EXECUTING ORIGINAL ==========");
+        if (ZAROriginalUpdateUndoMessageContent) {
+            @try {
+                ZAROriginalUpdateUndoMessageContent(self, _cmd, chatEntity);
+            } @catch (NSException *exception) {
+                ZARLog(@"[ZAR-DIFF] ORIGINAL EXCEPTION: %@", exception);
             }
         } else {
-            ZARLog(@"[ZAR-PROBE] arg = nil");
+            ZARLog(@"[ZAR-DIFF] ERROR: original IMP is NULL");
         }
 
-        ZARLog(@"[ZAR-PROBE] CALL STACK:");
-        NSArray *stack = [NSThread callStackSymbols];
-        for (NSString *line in stack) {
-            ZARLog(@"[ZAR-PROBE] %@", line);
-        }
-
-        ZARLog(@"[ZAR-PROBE] ==========================================");
-    }
-
-    // Pure read-only probe: never modify or block Zalo's original logic.
-    if (ZAROriginalUpdateUndoMessageContent) {
-        ZAROriginalUpdateUndoMessageContent(self, _cmd, arg);
+        ZARPrintChatEntityState(@"AFTER", chatEntity);
+        ZARLog(@"[ZAR-DIFF] ===== updateUndoMessageContent: EXIT =====");
     }
 }
 
-static void ZARInstallUndoProbe(void)
+static void ZARInstallDiffProbe(void)
 {
     if (ZARUndoProbeInstalled) {
-        ZARLog(@"[ZAR-PROBE] updateUndoMessageContent: probe already installed");
+        ZARLog(@"[ZAR-DIFF] probe already installed");
         return;
     }
 
-    Class cls = objc_getClass("UndoChatProcessor");
-    if (!cls) {
-        ZARLog(@"[ZAR-PROBE] UndoChatProcessor NOT FOUND after delay");
+    Class targetClass = objc_getClass("UndoChatProcessor");
+    if (!targetClass) {
+        ZARLog(@"[ZAR-DIFF] UndoChatProcessor NOT FOUND after delay");
         return;
     }
 
-    ZARLog(@"[ZAR-PROBE] UndoChatProcessor FOUND: %p", cls);
+    ZARLog(@"[ZAR-DIFF] UndoChatProcessor FOUND: %p", targetClass);
 
     SEL selector = NSSelectorFromString(@"updateUndoMessageContent:");
-    Method method = class_getInstanceMethod(cls, selector);
+    Method targetMethod = class_getInstanceMethod(targetClass, selector);
     BOOL isClassMethod = NO;
 
-    if (!method) {
-        // Fall back to the metaclass for a +class method.
-        method = class_getClassMethod(cls, selector);
-        if (method) {
+    if (!targetMethod) {
+        targetMethod = class_getClassMethod(targetClass, selector);
+        if (targetMethod) {
             isClassMethod = YES;
-            ZARLog(@"[ZAR-PROBE] FOUND as CLASS METHOD!");
+            ZARLog(@"[ZAR-DIFF] FOUND as CLASS METHOD!");
         }
     } else {
-        ZARLog(@"[ZAR-PROBE] FOUND as INSTANCE METHOD!");
+        ZARLog(@"[ZAR-DIFF] FOUND as INSTANCE METHOD!");
     }
 
-    if (!method) {
-        ZARLog(@"[ZAR-PROBE] updateUndoMessageContent: STRICTLY NOT FOUND");
+    if (!targetMethod) {
+        ZARLog(@"[ZAR-DIFF] updateUndoMessageContent: STRICTLY NOT FOUND");
         return;
     }
 
-    const char *types = method_getTypeEncoding(method);
-    IMP original = method_getImplementation(method);
+    const char *types = method_getTypeEncoding(targetMethod);
+    IMP original = method_getImplementation(targetMethod);
 
-    ZARLog(@"[ZAR-PROBE] selector=%@ methodKind=%@ types=%s originalIMP=%p",
+    ZARLog(@"[ZAR-DIFF] selector=%@ methodKind=%@ types=%s originalIMP=%p",
            NSStringFromSelector(selector),
            isClassMethod ? @"CLASS" : @"INSTANCE",
            types ?: "(null)",
            original);
 
     if (!original) {
-        ZARLog(@"[ZAR-PROBE] Abort: original IMP is nil");
+        ZARLog(@"[ZAR-DIFF] original IMP is NULL; abort");
         return;
     }
 
     if (original == (IMP)ZARHookUpdateUndoMessageContent) {
         ZARUndoProbeInstalled = YES;
-        ZARLog(@"[ZAR-PROBE] probe already points to our hook");
+        ZARLog(@"[ZAR-DIFF] probe already points to our hook");
         return;
     }
 
-    // Expected signature confirmed by static analysis: v24@0:8@16.
     if (!types || strcmp(types, "v24@0:8@16") != 0) {
-        ZARLog(@"[ZAR-PROBE] WARNING: unexpected type encoding=%s; skip hook",
-               types ?: "(null)");
+        ZARLog(@"[ZAR-DIFF] unexpected type encoding=%s; abort", types ?: "(null)");
         return;
     }
 
-    ZAROriginalUpdateUndoMessageContent =
-        (void (*)(id, SEL, id))original;
-
-    method_setImplementation(method, (IMP)ZARHookUpdateUndoMessageContent);
+    ZAROriginalUpdateUndoMessageContent = (void (*)(id, SEL, id))original;
+    method_setImplementation(targetMethod, (IMP)ZARHookUpdateUndoMessageContent);
     ZARUndoProbeInstalled = YES;
 
-    ZARLog(@"[ZAR-PROBE] HOOK INSTALLED: UndoChatProcessor updateUndoMessageContent: (%@ METHOD)",
+    ZARLog(@"[ZAR-DIFF] BEFORE/AFTER probe INSTALLED (%@ METHOD)",
            isClassMethod ? @"CLASS" : @"INSTANCE");
 }
 
 void ZARRunMessageTrace(void)
 {
-    ZARLog(@"===== ZolaAntiRecall SAFE DELAYED UNDO PROBE =====");
+    ZARLog(@"===== ZolaAntiRecall BEFORE/AFTER DIFF PROBE =====");
     ZARLog(@"Process=%@ PID=%d",
            NSProcessInfo.processInfo.processName,
            NSProcessInfo.processInfo.processIdentifier);
 
-    // Wait for Zalo's business classes to finish loading into the Objective-C runtime.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                   (int64_t)(5.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        ZARInstallUndoProbe();
+        ZARInstallDiffProbe();
     });
 }
 
