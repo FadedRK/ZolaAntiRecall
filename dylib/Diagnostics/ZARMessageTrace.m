@@ -118,7 +118,7 @@ static void ZARInstallProbeHook(void) {
 
 void ZARRunMessageTrace(void) {
     ZARLog(@"===== ZolaAntiRecall parameter probe =====");
-    ZARLog(@"Process=%@ PID=%d", NSProcessInfo.processInfo.processName, NSProcessInfo.processIdentifier);
+    ZARLog(@"Process=%@ PID=%d", NSProcessInfo.processInfo.processName, NSProcessInfo.processInfo.processIdentifier);
     ZARInstallProbeHook();
     ZARLog(@"[ZAR-PROBE] READ-ONLY ONLY: updateUndoMessageContent:; original is always called");
 }
