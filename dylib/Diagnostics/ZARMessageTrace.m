@@ -9,15 +9,8 @@ static void (*ZAROriginalUpdateUndoMessageContent)(id, SEL, id) = NULL;
 static BOOL ZARUndoProbeInstalled = NO;
 
 static NSMutableDictionary *ZARRecallOriginalMessageCache;
+static NSMutableDictionary *ZARRecallContentSnapshotCache;
 static os_unfair_lock ZARRecallCacheLock = OS_UNFAIR_LOCK_INIT;
-
-static void ZAREnsureRecallCache(void)
-{
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        ZARRecallOriginalMessageCache = [NSMutableDictionary dictionary];
-    });
-}
 
 static id ZARSafeGetValue(id target, NSString *key)
 {
@@ -66,16 +59,82 @@ static NSString *ZARCacheKeyForMessageId(id messageId)
     return [NSString stringWithFormat:@"o:%@", ZARSafeDescription(messageId)];
 }
 
-static void ZARCacheOriginalMessage(id messageId, NSString *message)
+static void ZAREnsureRecallCache(void)
 {
-    if (!messageId || !message.length) return;
-    ZAREnsureRecallCache();
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        ZARRecallOriginalMessageCache = [NSMutableDictionary dictionary];
+        ZARRecallContentSnapshotCache = [NSMutableDictionary dictionary];
+    });
+}
+
+/*
+ * ChatEntity 的附件字段在不同 Zalo 版本中可能不同，因此这里不假定单一 schema。
+ * 这些字段只做 BEFORE 快照/诊断；真正的附件对象不主动重建、不调用未知 setter，
+ * 这样拦截时可以保留原实体里的 sticker/image/file/rich-text 对象。
+ */
+static NSArray<NSString *> *ZARRecallCandidateFields(void)
+{
+    static NSArray<NSString *> *fields;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        fields = @[
+            @"attachment", @"attachmentData", @"mediaPath", @"mediaUrl", @"mediaURL",
+            @"stickerId", @"stickerID", @"stickerPath", @"caption", @"filePath", @"fileURL",
+            @"fileUrl", @"imagePath", @"imageURL", @"imageUrl", @"videoPath", @"videoURL",
+            @"audioPath", @"audioURL", @"thumbPath", @"thumbnailPath", @"resourcePath",
+            @"localPath", @"localURL", @"content", @"richText", @"rtfMessage", @"extraData",
+            @"extraInfo", @"media", @"sticker", @"file", @"image", @"video", @"audio"
+        ];
+    });
+    return fields;
+}
+
+static id ZARSafeSnapshotValue(id value)
+{
+    if (!value || value == [NSNull null]) return nil;
+
+    if ([value conformsToProtocol:@protocol(NSCopying)]) {
+        @try {
+            id copyValue = [value copy];
+            return copyValue ?: value;
+        } @catch (__unused NSException *exception) {
+        }
+    }
+
+    // 对不可复制的复杂对象只保存可读快照，避免长期强引用媒体对象造成内存增长。
+    return ZARSafeDescription(value);
+}
+
+static void ZARCacheRecallContentSnapshot(id chatEntity)
+{
+    id messageId = ZARSafeMessageId(chatEntity);
     NSString *key = ZARCacheKeyForMessageId(messageId);
     if (!key) return;
+
+    NSMutableDictionary *snapshot = [NSMutableDictionary dictionary];
+    NSString *message = ZARSafeStringValue(ZARSafeGetValue(chatEntity, @"message"));
+    if (message.length) snapshot[@"message"] = [message copy];
+
+    for (NSString *field in ZARRecallCandidateFields()) {
+        id value = ZARSafeGetValue(chatEntity, field);
+        if (!value || value == [NSNull null]) continue;
+        id safeValue = ZARSafeSnapshotValue(value);
+        if (safeValue) snapshot[field] = safeValue;
+    }
+
+    id origin = ZARSafeGetValue(chatEntity, @"originTextRecallMsg");
+    if (origin) {
+        id safeOrigin = ZARSafeSnapshotValue(origin);
+        if (safeOrigin) snapshot[@"originTextRecallMsg"] = safeOrigin;
+    }
+
     os_unfair_lock_lock(&ZARRecallCacheLock);
-    ZARRecallOriginalMessageCache[key] = [message copy];
+    if (snapshot.count) ZARRecallContentSnapshotCache[key] = snapshot;
+    if (message.length) ZARRecallOriginalMessageCache[key] = [message copy];
     os_unfair_lock_unlock(&ZARRecallCacheLock);
-    ZARLog(@"[ZAR-RECALL] cached original message: key=%@ text=%@", key, message);
+
+    ZARLog(@"[ZAR-RECALL] BEFORE snapshot key=%@ fields=%@", key, snapshot.allKeys);
 }
 
 static NSString *ZARCachedOriginalMessage(id messageId)
@@ -84,24 +143,28 @@ static NSString *ZARCachedOriginalMessage(id messageId)
     ZAREnsureRecallCache();
     NSString *key = ZARCacheKeyForMessageId(messageId);
     if (!key) return nil;
+
     os_unfair_lock_lock(&ZARRecallCacheLock);
     NSString *message = [ZARRecallOriginalMessageCache[key] copy];
     os_unfair_lock_unlock(&ZARRecallCacheLock);
     return message;
 }
 
-static NSString *ZARLocalizedRecallTag(BOOL isMyRecall)
+static NSString *ZARLocalizedRecallTag(BOOL isMyRecall, BOOL hasRichContent)
 {
     NSArray<NSString *> *languages = [NSLocale preferredLanguages];
     NSString *language = languages.firstObject.lowercaseString ?: @"";
 
     if ([language hasPrefix:@"zh"]) {
-        return isMyRecall ? @"【你已撤回】" : @"【已被对方撤回】";
+        if (isMyRecall) return hasRichContent ? @"【你已撤回】" : @"【你已撤回】";
+        return hasRichContent ? @"【内容已被对方撤回】" : @"【已被对方撤回】";
     }
     if ([language hasPrefix:@"vi"]) {
-        return isMyRecall ? @"【Bạn đã thu hồi】" : @"【Đã bị đối phương thu hồi】";
+        if (isMyRecall) return @"【Bạn đã thu hồi】";
+        return hasRichContent ? @"【Nội dung đã bị đối phương thu hồi】" : @"【Đã bị đối phương thu hồi】";
     }
-    return isMyRecall ? @"【You recalled this message】" : @"【Recalled by the other person】";
+    if (isMyRecall) return @"【You recalled this message】";
+    return hasRichContent ? @"【Content recalled by the other person】" : @"【Recalled by the other person】";
 }
 
 static NSString *ZARTaggedMessage(NSString *original, NSString *tag)
@@ -117,22 +180,47 @@ static BOOL ZARIsRecallDelByMySelf(id chatEntity)
     return [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;
 }
 
+static BOOL ZARHasRichContent(id chatEntity)
+{
+    for (NSString *field in ZARRecallCandidateFields()) {
+        id value = ZARSafeGetValue(chatEntity, field);
+        if (!value || value == [NSNull null]) continue;
+        if ([field.lowercaseString containsString:@"sticker"] ||
+            [field.lowercaseString containsString:@"attach"] ||
+            [field.lowercaseString containsString:@"media"] ||
+            [field.lowercaseString containsString:@"image"] ||
+            [field.lowercaseString containsString:@"video"] ||
+            [field.lowercaseString containsString:@"audio"] ||
+            [field.lowercaseString containsString:@"file"] ||
+            [field.lowercaseString containsString:@"rich"] ||
+            [field.lowercaseString containsString:@"rtf"] ||
+            [field.lowercaseString containsString:@"sticker"]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static NSString *ZARRecallTextForOther(id chatEntity)
 {
     id messageId = ZARSafeMessageId(chatEntity);
     NSString *currentMessage = ZARSafeStringValue(ZARSafeGetValue(chatEntity, @"message"));
     if (currentMessage.length) {
-        ZARCacheOriginalMessage(messageId, currentMessage);
+        ZARCacheRecallContentSnapshot(chatEntity);
         return currentMessage;
     }
-    return ZARCachedOriginalMessage(messageId);
+
+    NSString *cached = ZARCachedOriginalMessage(messageId);
+    if (cached.length) return cached;
+
+    return nil;
 }
 
 static NSString *ZARRecallTextForMyself(id chatEntity)
 {
     NSString *origin = ZARSafeStringValue(ZARSafeGetValue(chatEntity, @"originTextRecallMsg"));
     if (origin.length) {
-        ZARCacheOriginalMessage(ZARSafeMessageId(chatEntity), origin);
+        ZARCacheRecallContentSnapshot(chatEntity);
         return origin;
     }
     return ZARCachedOriginalMessage(ZARSafeMessageId(chatEntity));
@@ -155,7 +243,7 @@ static BOOL ZARSetMessageSafely(id chatEntity, NSString *message)
 
 static void ZARRefreshEntityInMemory(id chatEntity)
 {
-    ZARLog(@"[ZAR-RECALL] ChatEntity memory updated; no private UI refresh invoked");
+    ZARLog(@"[ZAR-RECALL] ChatEntity memory updated; no private UI method invoked");
 }
 
 static void ZARHandleRecallWithoutOriginal(id self, SEL _cmd, id chatEntity)
@@ -169,7 +257,7 @@ static void ZARHandleRecallWithoutOriginal(id self, SEL _cmd, id chatEntity)
 
     BOOL isMyRecall = ZARIsRecallDelByMySelf(chatEntity);
 
-    // True native pass-through: do not inspect or mutate the entity before orig.
+    // 自己撤回关闭开关：严格原生放行，不做任何实体检查/修改。
     if (isMyRecall && ![ZARSettings sharedInstance].showMyRecallEnabled) {
         ZARLog(@"[ZAR-RECALL] my recall display disabled -> ORIGINAL PASS-THROUGH");
         if (ZAROriginalUpdateUndoMessageContent) {
@@ -178,15 +266,31 @@ static void ZARHandleRecallWithoutOriginal(id self, SEL _cmd, id chatEntity)
         return;
     }
 
+    // 在任何可能拦截的路径上，先完成 BEFORE 内容快照。
+    ZARCacheRecallContentSnapshot(chatEntity);
+
     NSString *originalMessage = isMyRecall
         ? ZARRecallTextForMyself(chatEntity)
         : ZARRecallTextForOther(chatEntity);
 
-    NSString *tag = ZARLocalizedRecallTag(isMyRecall);
+    BOOL hasRichContent = ZARHasRichContent(chatEntity);
+    NSString *tag = ZARLocalizedRecallTag(isMyRecall, hasRichContent);
     NSString *taggedMessage = ZARTaggedMessage(originalMessage, tag);
 
+    if (!taggedMessage.length && hasRichContent) {
+        /*
+         * 非纯文本消息：不要因为 message 为空而回退到 orig。
+         * orig 正是可能把 attachment/sticker/media 等内容抹掉的路径。
+         * 保留 ChatEntity 当前附件对象，只把一个轻量标签写进 message，
+         * 让实体继续存在；具体 Cell 是否继续渲染媒体由 Zalo 自己的字段决定。
+         */
+        taggedMessage = tag;
+        ZARLog(@"[ZAR-RECALL] rich-content recall: message empty; preserve attachment fields, tag=%@", tag);
+    }
+
     if (!taggedMessage.length) {
-        ZARLog(@"[ZAR-RECALL] original text unavailable -> ORIGINAL");
+        // 纯文本无法恢复且没有附件字段时，仍然不要猜测数据结构；安全回退原逻辑。
+        ZARLog(@"[ZAR-RECALL] original content unavailable -> ORIGINAL");
         if (ZAROriginalUpdateUndoMessageContent) {
             ZAROriginalUpdateUndoMessageContent(self, _cmd, chatEntity);
         }
@@ -194,9 +298,12 @@ static void ZARHandleRecallWithoutOriginal(id self, SEL _cmd, id chatEntity)
     }
 
     ZARLog(@"[ZAR-RECALL] ===== INTERCEPT updateUndoMessageContent: =====");
-    ZARLog(@"[ZAR-RECALL] isMyRecall=%@ showMyRecall=%@", isMyRecall ? @"YES" : @"NO", [ZARSettings sharedInstance].showMyRecallEnabled ? @"YES" : @"NO");
-    ZARLog(@"[ZAR-RECALL] tag=%@", tag);
-    ZARLog(@"[ZAR-RECALL] BLOCK ORIGINAL; preserve entity message");
+    ZARLog(@"[ZAR-RECALL] isMyRecall=%@ showMyRecall=%@ richContent=%@ tag=%@",
+           isMyRecall ? @"YES" : @"NO",
+           [ZARSettings sharedInstance].showMyRecallEnabled ? @"YES" : @"NO",
+           hasRichContent ? @"YES" : @"NO",
+           tag);
+    ZARLog(@"[ZAR-RECALL] BLOCK ORIGINAL; preserve entity content");
 
     BOOL messageUpdated = ZARSetMessageSafely(chatEntity, taggedMessage);
     if (messageUpdated) {
@@ -220,7 +327,7 @@ static void ZARInstallDiffProbe(void)
         return;
     }
 
-    Class targetClass = objc_getClass("UndoChatProcessor");
+    Class targetClass = objc_getClass(@"UndoChatProcessor");
     if (!targetClass) {
         ZARLog(@"[ZAR-RECALL] UndoChatProcessor NOT FOUND after delay");
         return;
