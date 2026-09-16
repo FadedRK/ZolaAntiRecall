@@ -86,16 +86,30 @@ static void ZARInstallUndoProbe(void)
 
     SEL selector = NSSelectorFromString(@"updateUndoMessageContent:");
     Method method = class_getInstanceMethod(cls, selector);
+    BOOL isClassMethod = NO;
+
     if (!method) {
-        ZARLog(@"[ZAR-PROBE] updateUndoMessageContent: NOT FOUND");
+        // Fall back to the metaclass for a +class method.
+        method = class_getClassMethod(cls, selector);
+        if (method) {
+            isClassMethod = YES;
+            ZARLog(@"[ZAR-PROBE] FOUND as CLASS METHOD!");
+        }
+    } else {
+        ZARLog(@"[ZAR-PROBE] FOUND as INSTANCE METHOD!");
+    }
+
+    if (!method) {
+        ZARLog(@"[ZAR-PROBE] updateUndoMessageContent: STRICTLY NOT FOUND");
         return;
     }
 
     const char *types = method_getTypeEncoding(method);
     IMP original = method_getImplementation(method);
 
-    ZARLog(@"[ZAR-PROBE] selector=%@ types=%s originalIMP=%p",
+    ZARLog(@"[ZAR-PROBE] selector=%@ methodKind=%@ types=%s originalIMP=%p",
            NSStringFromSelector(selector),
+           isClassMethod ? @"CLASS" : @"INSTANCE",
            types ?: "(null)",
            original);
 
@@ -123,7 +137,8 @@ static void ZARInstallUndoProbe(void)
     method_setImplementation(method, (IMP)ZARHookUpdateUndoMessageContent);
     ZARUndoProbeInstalled = YES;
 
-    ZARLog(@"[ZAR-PROBE] HOOK INSTALLED: UndoChatProcessor updateUndoMessageContent:");
+    ZARLog(@"[ZAR-PROBE] HOOK INSTALLED: UndoChatProcessor updateUndoMessageContent: (%@ METHOD)",
+           isClassMethod ? @"CLASS" : @"INSTANCE");
 }
 
 void ZARRunMessageTrace(void)
