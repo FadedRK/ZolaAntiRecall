@@ -90,9 +90,23 @@ static NSString *ZARCachedOriginalMessage(id messageId)
     return message;
 }
 
+static NSString *ZARLocalizedRecallTag(BOOL isMyRecall)
+{
+    NSArray<NSString *> *languages = [NSLocale preferredLanguages];
+    NSString *language = languages.firstObject.lowercaseString ?: @"";
+
+    if ([language hasPrefix:@"zh"]) {
+        return isMyRecall ? @"【你已撤回】" : @"【已被对方撤回】";
+    }
+    if ([language hasPrefix:@"vi"]) {
+        return isMyRecall ? @"【Bạn đã thu hồi】" : @"【Đã bị đối phương thu hồi】";
+    }
+    return isMyRecall ? @"【You recalled this message】" : @"【Recalled by the other person】";
+}
+
 static NSString *ZARTaggedMessage(NSString *original, NSString *tag)
 {
-    if (!original.length) return nil;
+    if (!original.length || !tag.length) return nil;
     if ([original hasSuffix:tag]) return original;
     return [NSString stringWithFormat:@"%@\n%@", original, tag];
 }
@@ -141,8 +155,6 @@ static BOOL ZARSetMessageSafely(id chatEntity, NSString *message)
 
 static void ZARRefreshEntityInMemory(id chatEntity)
 {
-    // Do not invoke unknown private UI methods. The entity setter updates the object
-    // in memory, and the normal caller can continue using the same object.
     ZARLog(@"[ZAR-RECALL] ChatEntity memory updated; no private UI refresh invoked");
 }
 
@@ -157,8 +169,7 @@ static void ZARHandleRecallWithoutOriginal(id self, SEL _cmd, id chatEntity)
 
     BOOL isMyRecall = ZARIsRecallDelByMySelf(chatEntity);
 
-    // IMPORTANT: this branch is a true pass-through. No KVC reads, cache writes,
-    // message mutations, logging of entity state, or UI work before calling orig.
+    // True native pass-through: do not inspect or mutate the entity before orig.
     if (isMyRecall && ![ZARSettings sharedInstance].showMyRecallEnabled) {
         ZARLog(@"[ZAR-RECALL] my recall display disabled -> ORIGINAL PASS-THROUGH");
         if (ZAROriginalUpdateUndoMessageContent) {
@@ -167,15 +178,11 @@ static void ZARHandleRecallWithoutOriginal(id self, SEL _cmd, id chatEntity)
         return;
     }
 
-    BOOL showMyRecall = [ZARSettings sharedInstance].showMyRecallEnabled;
-    ZARLog(@"[ZAR-RECALL] ===== INTERCEPT updateUndoMessageContent: =====");
-    ZARLog(@"[ZAR-RECALL] isMyRecall=%@ showMyRecall=%@", isMyRecall ? @"YES" : @"NO", showMyRecall ? @"YES" : @"NO");
-
     NSString *originalMessage = isMyRecall
         ? ZARRecallTextForMyself(chatEntity)
         : ZARRecallTextForOther(chatEntity);
 
-    NSString *tag = isMyRecall ? @"[你已撤回]" : @"[已被对方撤回]";
+    NSString *tag = ZARLocalizedRecallTag(isMyRecall);
     NSString *taggedMessage = ZARTaggedMessage(originalMessage, tag);
 
     if (!taggedMessage.length) {
@@ -186,8 +193,10 @@ static void ZARHandleRecallWithoutOriginal(id self, SEL _cmd, id chatEntity)
         return;
     }
 
+    ZARLog(@"[ZAR-RECALL] ===== INTERCEPT updateUndoMessageContent: =====");
+    ZARLog(@"[ZAR-RECALL] isMyRecall=%@ showMyRecall=%@", isMyRecall ? @"YES" : @"NO", [ZARSettings sharedInstance].showMyRecallEnabled ? @"YES" : @"NO");
+    ZARLog(@"[ZAR-RECALL] tag=%@", tag);
     ZARLog(@"[ZAR-RECALL] BLOCK ORIGINAL; preserve entity message");
-    ZARLog(@"[ZAR-RECALL] final message=%@", taggedMessage);
 
     BOOL messageUpdated = ZARSetMessageSafely(chatEntity, taggedMessage);
     if (messageUpdated) {
@@ -240,10 +249,7 @@ static void ZARInstallDiffProbe(void)
     const char *types = method_getTypeEncoding(targetMethod);
     IMP original = method_getImplementation(targetMethod);
     ZARLog(@"[ZAR-RECALL] selector=%@ methodKind=%@ types=%s originalIMP=%p",
-           NSStringFromSelector(selector),
-           isClassMethod ? @"CLASS" : @"INSTANCE",
-           types ?: "(null)",
-           original);
+           NSStringFromSelector(selector), isClassMethod ? @"CLASS" : @"INSTANCE", types ?: "(null)", original);
 
     if (!original) return;
     if (original == (IMP)ZARHookUpdateUndoMessageContent) {
@@ -258,16 +264,14 @@ static void ZARInstallDiffProbe(void)
     ZAROriginalUpdateUndoMessageContent = (void (*)(id, SEL, id))original;
     method_setImplementation(targetMethod, (IMP)ZARHookUpdateUndoMessageContent);
     ZARUndoProbeInstalled = YES;
-    ZARLog(@"[ZAR-RECALL] FINAL HOOK INSTALLED: UndoChatProcessor updateUndoMessageContent: (%@ METHOD)",
-           isClassMethod ? @"CLASS" : @"INSTANCE");
+    ZARLog(@"[ZAR-RECALL] FINAL HOOK INSTALLED: UndoChatProcessor updateUndoMessageContent: (%@ METHOD)", isClassMethod ? @"CLASS" : @"INSTANCE");
 }
 
 void ZARRunMessageTrace(void)
 {
     ZARLog(@"===== ZolaAntiRecall FINAL RECALL INTERCEPT =====");
     ZARLog(@"Process=%@ PID=%d", NSProcessInfo.processInfo.processName, NSProcessInfo.processInfo.processIdentifier);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         ZARInstallDiffProbe();
     });
 }
