@@ -78,34 +78,6 @@ static void ZARHandleRecallWithData(id self, SEL _cmd, id arg) {
     if (orig) orig(self, alias, arg);
 }
 
-static void ZARUndoObjectBool(id self, SEL _cmd, id messageId, BOOL isGroup, BOOL isOwnerRecall) {
-    ZARLog(@"CALL class=%@ selector=%@ messageId=%@ isGroup=%d isOwnerRecall=%d",
-           NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd), messageId, isGroup, isOwnerRecall);
-    if (isOwnerRecall) {
-        ZARLog(@"BLOCKED owner recall at proccessUndoInMediaStore...");
-        return;
-    }
-    SEL alias = sel_registerName("zar_orig_proccessUndoInMediaStoreWithMessageId:isGroup:isOwnerRecall:");
-    void (*orig)(id, SEL, id, BOOL, BOOL) = (void (*)(id, SEL, id, BOOL, BOOL))[self methodForSelector:alias];
-    if (orig) orig(self, alias, messageId, isGroup, isOwnerRecall);
-}
-
-static void ZARUndoObjectChar(id self, SEL _cmd, id messageId, BOOL isGroup, BOOL isOwnerRecall) {
-    ZARUndoObjectBool(self, _cmd, messageId, isGroup, isOwnerRecall);
-}
-
-static void ZARUndoQBool(id self, SEL _cmd, long long messageId, BOOL isGroup, BOOL isOwnerRecall) {
-    ZARLog(@"CALL class=%@ selector=%@ messageId=%lld isGroup=%d isOwnerRecall=%d",
-           NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd), messageId, isGroup, isOwnerRecall);
-    if (isOwnerRecall) {
-        ZARLog(@"BLOCKED owner recall at proccessUndoInMediaStore...");
-        return;
-    }
-    SEL alias = sel_registerName("zar_orig_proccessUndoInMediaStoreWithMessageId:isGroup:isOwnerRecall:");
-    void (*orig)(id, SEL, long long, BOOL, BOOL) = (void (*)(id, SEL, long long, BOOL, BOOL))[self methodForSelector:alias];
-    if (orig) orig(self, alias, messageId, isGroup, isOwnerRecall);
-}
-
 static void ZARInstallDirectHook(Class cls, SEL sel, SEL alias, IMP replacement, const char *expectedTypes) {
     if (!cls) return;
     unsigned int count = 0;
@@ -129,62 +101,45 @@ static void ZARInstallDirectHook(Class cls, SEL sel, SEL alias, IMP replacement,
     free(methods);
 }
 
-static void ZARInstallUndoHooks(void) {
-    SEL sel = NSSelectorFromString(@"proccessUndoInMediaStoreWithMessageId:isGroup:isOwnerRecall:");
-    int count = objc_getClassList(NULL, 0);
-    if (count <= 0) return;
-    Class *classes = (__unsafe_unretained Class *)malloc(sizeof(Class) * (size_t)count);
-    if (!classes) return;
-    count = objc_getClassList(classes, count);
-    for (int i = 0; i < count; i++) {
-        Class cls = classes[i];
-        unsigned int mc = 0;
-        Method *methods = class_copyMethodList(cls, &mc);
-        for (unsigned int j = 0; j < mc; j++) {
-            Method m = methods[j];
-            if (method_getName(m) != sel) continue;
-            const char *types = method_getTypeEncoding(m);
-            SEL alias = sel_registerName("zar_orig_proccessUndoInMediaStoreWithMessageId:isGroup:isOwnerRecall:");
-            if (!strcmp(types, "v32@0:8@16B24B25")) {
-                ZARInstallDirectHook(cls, sel, alias, (IMP)ZARUndoObjectBool, types);
-            } else if (!strcmp(types, "v32@0:8@16c24c25")) {
-                ZARInstallDirectHook(cls, sel, alias, (IMP)ZARUndoObjectChar, types);
-            } else if (!strcmp(types, "v32@0:8q16B24B25")) {
-                ZARInstallDirectHook(cls, sel, alias, (IMP)ZARUndoQBool, types);
-            } else {
-                ZARLog(@"FOUND undo class=%@ unsupported types=%s", NSStringFromClass(cls), types ?: "(null)");
-            }
-            break;
-        }
-        free(methods);
+static void ZARRecallTimeBacktrace(id self, SEL _cmd, long long recallTime) {
+    ZARLog(@"RECALLTIME class=%@ selector=%@ recallTime=%lld self=%p",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           recallTime,
+           self);
+
+    NSArray<NSString *> *stack = [NSThread callStackSymbols];
+    NSUInteger limit = MIN((NSUInteger)10, stack.count);
+    ZARLog(@"RECALLTIME BACKTRACE frames=%lu", (unsigned long)limit);
+    for (NSUInteger i = 0; i < limit; i++) {
+        ZARLog(@"RECALLTIME #%lu %@", (unsigned long)i, stack[i]);
     }
-    free(classes);
+
+    SEL alias = sel_registerName("zar_orig_set_recallTime:");
+    void (*orig)(id, SEL, long long) = (void (*)(id, SEL, long long))[self methodForSelector:alias];
+    if (orig) orig(self, alias, recallTime);
 }
 
-static void ZARInstallObjectHook(Class cls, SEL sel, SEL alias, IMP replacement, const char *expectedTypes) {
-    if (!cls) return;
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
-    Method method = NULL;
-    for (unsigned int i = 0; i < count; i++) {
-        if (method_getName(methods[i]) == sel) { method = methods[i]; break; }
+static void ZARInstallRecallTimeBacktraceHook(void) {
+    Class chatEntity = NSClassFromString(@"ChatEntity");
+    if (!chatEntity) {
+        ZARLog(@"BACKTRACE hook skipped: ChatEntity not found");
+        return;
     }
-    if (!method) { free(methods); return; }
-    const char *types = method_getTypeEncoding(method);
-    if (!types || strcmp(types, expectedTypes) != 0) { free(methods); return; }
-    if (class_getInstanceMethod(cls, alias)) { free(methods); return; }
-    class_addMethod(cls, alias, method_getImplementation(method), types);
-    method_setImplementation(method, replacement);
-    free(methods);
+    ZARInstallDirectHook(chatEntity,
+                         @selector(set_recallTime:),
+                         sel_registerName("zar_orig_set_recallTime:"),
+                         (IMP)ZARRecallTimeBacktrace,
+                         "v24@0:8q16");
 }
 
 static void ZARInstallInvocationTrace(void) {
     Class data = NSClassFromString(@"MSDataCoordinator");
     Class cache = NSClassFromString(@"MSLocalCache");
-    ZARInstallObjectHook(data, @selector(handleRecallMessageNotification:), sel_registerName("zar_orig_handleRecallMessageNotification:"), (IMP)ZARHandleRecall, "v24@0:8@16");
-    ZARInstallObjectHook(cache, @selector(handleRecallMessageNotification:), sel_registerName("zar_orig_handleRecallMessageNotification:"), (IMP)ZARHandleRecall, "v24@0:8@16");
-    ZARInstallObjectHook(data, NSSelectorFromString(@"_handleRecallWithData:"), sel_registerName("zar_orig__handleRecallWithData:"), (IMP)ZARHandleRecallWithData, "v24@0:8@16");
-    ZARInstallUndoHooks();
+    ZARInstallDirectHook(data, @selector(handleRecallMessageNotification:), sel_registerName("zar_orig_handleRecallMessageNotification:"), (IMP)ZARHandleRecall, "v24@0:8@16");
+    ZARInstallDirectHook(cache, @selector(handleRecallMessageNotification:), sel_registerName("zar_orig_handleRecallMessageNotification:"), (IMP)ZARHandleRecall, "v24@0:8@16");
+    ZARInstallDirectHook(data, NSSelectorFromString(@"_handleRecallWithData:"), sel_registerName("zar_orig__handleRecallWithData:"), (IMP)ZARHandleRecallWithData, "v24@0:8@16");
+    ZARInstallRecallTimeBacktraceHook();
 }
 
 void ZARRunMessageTrace(void) {
@@ -192,7 +147,7 @@ void ZARRunMessageTrace(void) {
     ZARLog(@"Process=%@ PID=%d", NSProcessInfo.processInfo.processName, NSProcessInfo.processInfo.processIdentifier);
     for (NSString *name in ZARKeywords()) ZARScanSelector(NSSelectorFromString(name));
     ZARInstallInvocationTrace();
-    ZARLog(@"EARLY owner-recall undo hook installed");
+    ZARLog(@"READ-ONLY ChatEntity set_recallTime backtrace hook installed");
 }
 
 NSString *ZARDiagnosticText(void) {
