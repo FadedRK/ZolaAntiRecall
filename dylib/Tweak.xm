@@ -2,11 +2,13 @@
 #import "Core/ZARLogger.h"
 #import "Diagnostics/ZARMessageTrace.h"
 #import "Settings/ZARSettings.h"
+#import "Localization/ZARLocalization.h"
 
 __attribute__((constructor))
 static void ZARInit(void) {
     @autoreleasepool {
-        ZARLog(@"ZolaAntiRecall loaded; TRACE ONLY; no recall blocking");
+        ZARLog(@"ZolaAntiRecall loaded; initializing recall + localization modules");
+        ZARInstallLocalization();
         ZARInstallMessageTrace();
         ZARInstallSettings();
     }
