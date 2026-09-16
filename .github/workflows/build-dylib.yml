@@ -24,6 +24,11 @@ jobs:
           xcodebuild -version
           clang --version
 
+      - name: Generate embedded localization table
+        run: |
+          python3 dylib/build_embed.py
+          wc -c dylib/TranslationsData.m
+
       - name: Build dylib
         run: |
           make -C dylib clean
