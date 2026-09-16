@@ -120,6 +120,77 @@ static void ZARRecallTimeBacktrace(id self, SEL _cmd, long long recallTime) {
     if (orig) orig(self, alias, recallTime);
 }
 
+
+static void ZARLogStackWithPrefix(NSString *prefix) {
+    NSArray<NSString *> *stack = [NSThread callStackSymbols];
+    NSUInteger limit = MIN((NSUInteger)16, stack.count);
+    ZARLog(@"%@ frames=%lu", prefix, (unsigned long)limit);
+    for (NSUInteger i = 0; i < limit; i++) {
+        ZARLog(@"%@ #%lu %@", prefix, (unsigned long)i, stack[i]);
+    }
+}
+
+static void ZARPBDataReaderRecallTrace(id self, SEL _cmd, const void *buffer) {
+    ZARLog(@"[ZALO_PB_RECALL] class=%@ selector=%@ buffer=%p",
+           NSStringFromClass(object_getClass(self)),
+           NSStringFromSelector(_cmd),
+           buffer);
+    ZARLog(@"[ZALO_PB_RECALL] thread=%@ main=%d",
+           [NSThread currentThread],
+           [NSThread isMainThread] ? 1 : 0);
+    ZARLogStackWithPrefix(@"[ZALO_PB_RECALL_STACK]");
+
+    SEL alias = sel_registerName("zar_orig_pbdatareader_recall:");
+    void (*orig)(id, SEL, const void *) =
+        (void (*)(id, SEL, const void *))[self methodForSelector:alias];
+    if (orig) orig(self, alias, buffer);
+}
+
+static BOOL ZARIsRecallNotification(NSString *name, NSDictionary *userInfo) {
+    NSString *lower = name.lowercaseString ?: @"";
+    if ([lower containsString:@"recall"]) return YES;
+    if (userInfo[@"messageId"] != nil && userInfo[@"isOwnerRecall"] != nil) return YES;
+    return NO;
+}
+
+static void ZARNotificationPostTrace(id self,
+                                     SEL _cmd,
+                                     NSString *name,
+                                     id object,
+                                     NSDictionary *userInfo) {
+    if (ZARIsRecallNotification(name, userInfo)) {
+        ZARLog(@"[ZALO_NOTIFICATION] name=%@ objectClass=%@ object=%p userInfo=%@",
+               name ?: @"(nil)",
+               object ? NSStringFromClass(object_getClass(object)) : @"(nil)",
+               object,
+               userInfo ?: @{});
+        ZARLog(@"[ZALO_NOTIFICATION] thread=%@ main=%d",
+               [NSThread currentThread],
+               [NSThread isMainThread] ? 1 : 0);
+        ZARLogStackWithPrefix(@"[ZALO_NOTIFICATION_STACK]");
+    }
+
+    SEL alias = sel_registerName("zar_orig_postNotificationName:object:userInfo:");
+    void (*orig)(id, SEL, NSString *, id, NSDictionary *) =
+        (void (*)(id, SEL, NSString *, id, NSDictionary *))[self methodForSelector:alias];
+    if (orig) orig(self, alias, name, object, userInfo);
+}
+
+static void ZARInstallRecallProbeHooks(void) {
+    Class reader = NSClassFromString(@"PBDataReader");
+    ZARInstallDirectHook(reader,
+                         @selector(recall:),
+                         sel_registerName("zar_orig_pbdatareader_recall:"),
+                         (IMP)ZARPBDataReaderRecallTrace,
+                         "v24@0:8r^{?=QQ}16");
+
+    ZARInstallDirectHook([NSNotificationCenter class],
+                         @selector(postNotificationName:object:userInfo:),
+                         sel_registerName("zar_orig_postNotificationName:object:userInfo:"),
+                         (IMP)ZARNotificationPostTrace,
+                         "v40@0:8@16@24@32");
+}
+
 static void ZARInstallRecallTimeBacktraceHook(void) {
     Class chatEntity = NSClassFromString(@"ChatEntity");
     if (!chatEntity) {
@@ -140,6 +211,7 @@ static void ZARInstallInvocationTrace(void) {
     ZARInstallDirectHook(cache, @selector(handleRecallMessageNotification:), sel_registerName("zar_orig_handleRecallMessageNotification:"), (IMP)ZARHandleRecall, "v24@0:8@16");
     ZARInstallDirectHook(data, NSSelectorFromString(@"_handleRecallWithData:"), sel_registerName("zar_orig__handleRecallWithData:"), (IMP)ZARHandleRecallWithData, "v24@0:8@16");
     ZARInstallRecallTimeBacktraceHook();
+    ZARInstallRecallProbeHooks();
 }
 
 void ZARRunMessageTrace(void) {
@@ -147,7 +219,7 @@ void ZARRunMessageTrace(void) {
     ZARLog(@"Process=%@ PID=%d", NSProcessInfo.processInfo.processName, NSProcessInfo.processInfo.processIdentifier);
     for (NSString *name in ZARKeywords()) ZARScanSelector(NSSelectorFromString(name));
     ZARInstallInvocationTrace();
-    ZARLog(@"READ-ONLY ChatEntity set_recallTime backtrace hook installed");
+    ZARLog(@"READ-ONLY TRACE: set_recallTime + PBDataReader recall: + NSNotificationCenter postNotificationName:object:userInfo:; all originals are called");
 }
 
 NSString *ZARDiagnosticText(void) {
