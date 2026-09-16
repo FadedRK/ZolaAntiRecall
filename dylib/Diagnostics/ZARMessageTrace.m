@@ -177,12 +177,12 @@ static NSArray<NSString *> *ZARRecallCandidateFields(void)
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         fields = @[
-            @"attachment", @"attachmentData", @"mediaPath", @"mediaUrl", @"mediaURL",
-            @"stickerId", @"stickerID", @"stickerPath", @"caption", @"filePath", @"fileURL",
-            @"fileUrl", @"imagePath", @"imageURL", @"imageUrl", @"videoPath", @"videoURL",
-            @"audioPath", @"audioURL", @"thumbPath", @"thumbnailPath", @"resourcePath",
-            @"localPath", @"localURL", @"content", @"richText", @"rtfMessage", @"extraData",
-            @"extraInfo", @"media", @"sticker", @"file", @"image", @"video", @"audio"
+            @"mediaId",
+            @"richMsgNormal",
+            @"msgExtraData",
+            @"paramExt",
+            @"property",
+            @"mediatype"
         ];
     });
     return fields;
@@ -266,13 +266,47 @@ static BOOL ZARIsRecallDelByMySelf(id chatEntity)
 
 static BOOL ZARHasRichContent(id chatEntity)
 {
-    for (NSString *field in ZARRecallCandidateFields()) {
-        id value = ZARSafeGetValue(chatEntity, field);
-        if (!value || value == [NSNull null]) continue;
-        NSString *name = field.lowercaseString;
-        if ([name containsString:@"sticker"] || [name containsString:@"attach"] || [name containsString:@"media"] || [name containsString:@"image"] || [name containsString:@"video"] || [name containsString:@"audio"] || [name containsString:@"file"] || [name containsString:@"rich"] || [name containsString:@"rtf"]) return YES;
+    // 条件 A：message 存在且长度大于 0（普通消息 / 贴纸）
+    NSString *message = ZARSafeStringValue(ZARSafeGetValue(chatEntity, @"message"));
+    if (message.length > 0 &&
+        ![message isEqualToString:@"<null>"] &&
+        ![message isEqualToString:@"<Not Found>"]) {
+        return YES;
     }
-    return NO;
+
+    // 条件 B：richMsgNormal 存在，且不是无效占位字符串
+    id richMsgNormal = ZARSafeGetValue(chatEntity, @"richMsgNormal");
+    if (richMsgNormal &&
+        richMsgNormal != [NSNull null] &&
+        ![richMsgNormal isEqual:@"<null>"] &&
+        ![richMsgNormal isEqual:@"<Not Found>"]) {
+        return YES;
+    }
+
+    // 条件 C：mediaId 存在且长度大于 0，且不是无效占位字符串
+    NSString *mediaId = ZARSafeStringValue(ZARSafeGetValue(chatEntity, @"mediaId"));
+    if (mediaId.length > 0 &&
+        ![mediaId isEqualToString:@"<null>"] &&
+        ![mediaId isEqualToString:@"<Not Found>"]) {
+        return YES;
+    }
+
+    // 条件 D：mediatype > 0，安全转换后再判断
+    id mediaTypeValue = ZARSafeGetValue(chatEntity, @"mediatype");
+    NSInteger mediaType = 0;
+    if (mediaTypeValue &&
+        mediaTypeValue != [NSNull null] &&
+        ![mediaTypeValue isEqual:@"<null>"] &&
+        ![mediaTypeValue isEqual:@"<Not Found>"]) {
+        if ([mediaTypeValue respondsToSelector:@selector(integerValue)]) {
+            mediaType = [mediaTypeValue integerValue];
+        } else {
+            NSString *mediaTypeString = ZARSafeStringValue(mediaTypeValue);
+            mediaType = [mediaTypeString integerValue];
+        }
+    }
+
+    return mediaType > 0;
 }
 
 static NSString *ZARRecallTextForOther(id chatEntity)
