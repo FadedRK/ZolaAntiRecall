@@ -5,7 +5,17 @@ ARCHS = arm64 arm64e
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = ZolaAntiRecall
-ZolaAntiRecall_FILES = Tweak.xm Core/ZARLogger.m Diagnostics/ZARMessageTrace.m Settings/ZARSettings.m Localization/ZARLocalization.m TranslationsData.m
+ZolaAntiRecall_FILES = \
+    Tweak.xm \
+    Core/ZARLogger.m \
+    Diagnostics/ZARMessageTrace.m \
+    Recall/ZARRecallCache.m \
+    Recall/ZARRecallClassifier.m \
+    Recall/ZARRecallInterceptor.m \
+    Settings/ZARSettings.m \
+    Localization/ZARLocalization.m \
+    TranslationsData.m
+
 ZolaAntiRecall_CFLAGS = -fobjc-arc
 ZolaAntiRecall_FRAMEWORKS = Foundation UIKit
 ZolaAntiRecall_LDFLAGS = -install_name @rpath/ZolaAntiRecall.dylib
