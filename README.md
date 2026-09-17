@@ -1,29 +1,76 @@
 # ZolaAntiRecall
 
-Zalo iOS anti-recall research project.
+Zalo iOS anti-recall research project for jailbroken/rootless Theos environments.
 
-## Goal
-Locate the real recall notification / message-model mutation path and eventually prevent the original recall operation from mutating the local message model.
+## Current architecture
 
-## Principles
-- No UI-level anti-recall as the core solution.
-- No speculative hook is treated as confirmed.
-- Trace first, then hook the earliest verified data/notification handler.
-- Keep diagnostics separate from blocking logic.
-- One test device is available, so every build must be self-diagnosing.
+```text
+Tweak.xm
+  ├─ Localization
+  ├─ Settings
+  └─ Diagnostics
+       └─ Recall Interceptor
+            ├─ Recall Cache
+            └─ Recall Classifier
+```
 
-## Current evidence
-Known Zalo runtime candidates include:
-- handleRecallMessageNotification:
-- _handleRecallWithData:
-- onActionRecallMessages:
-- processAfterRecallMessageSuccess:
-- proccessUndoInMediaStoreWithMessageId:isGroup:isOwnerRecall:
-- updateDBWhenRecalledChats:completion:
-- set_recallTime:
-- setRecallTime:
-- recall:
+### Modules
 
-Runtime traces have shown MSDataCoordinator, MSLocalCache, ConversationModel, and ChatEntity around recall handling.
+- `Core/` — logging and shared runtime utilities.
+- `Diagnostics/` — runtime target detection and diagnostic output only.
+- `Recall/` — recall classification, message cache, and interception logic.
+- `Settings/` — plugin settings and diagnostic screen.
+- `Localization/` — zh / vi / en UI localization.
+- `UI/` — legacy standalone menu injector; not currently part of the build target.
 
-The current investigation target is the message/data layer, not UILabel/UI rendering.
+## Verified interception target under investigation
+
+Current code probes:
+
+- Class: `UndoChatProcessor`
+- Selector: `updateUndoMessageContent:`
+- Expected type encoding: `v24@0:8@16`
+
+The interceptor replaces the verified IMP only after the class, selector, implementation and signature checks succeed.
+
+## Recall flow
+
+```text
+Recall event
+    ↓
+UndoChatProcessor.updateUndoMessageContent:
+    ↓
+ZARRecallInterceptor
+    ├─ master switch
+    ├─ self/other recall classification
+    ├─ original text / cached text lookup
+    ├─ rich-content detection
+    └─ ChatEntity.message replacement
+          ↓
+      original mutation is skipped
+```
+
+## Important limitation
+
+The current cache is still populated from the available `ChatEntity` at recall handling time. The next research task is to hook an earlier normal-message lifecycle point so the original content is cached **before** Zalo starts recall mutation.
+
+Do not treat the current hook as confirmed across all Zalo versions until it is verified on the target build/device.
+
+## Build
+
+The project uses Theos. `build_embed.py` generates `dylib/TranslationsData.m` from `Translations.plist` before building when translation data is present.
+
+```bash
+cd dylib
+python3 build_embed.py
+make package FINALPACKAGE=1
+```
+
+## Development order
+
+1. Verify `UndoChatProcessor.updateUndoMessageContent:` on the target Zalo build.
+2. Locate an earlier message-model lifecycle point for reliable pre-recall caching.
+3. Verify plain-text recall.
+4. Verify self-recall behavior.
+5. Verify image/file/sticker/media behavior.
+6. Regression-test master switch and fallback-to-original behavior.
