@@ -7,7 +7,7 @@
 __attribute__((constructor))
 static void ZARInit(void) {
     @autoreleasepool {
-        ZARLog(@"ZolaAntiRecall loaded; initializing recall + localization modules");
+        ZARLog(@"ZolaAntiRecall loaded; initializing modules");
         ZARInstallLocalization();
         ZARInstallMessageTrace();
         ZARInstallSettings();
